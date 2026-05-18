@@ -1,727 +1,683 @@
+
+
+
 /**
  * ============================================================
- * ProjectFlow — Outil de ticketing collaboratif
+ * ProjectFlow — v2.0 Slate Edition
  * ============================================================
+ * Refonte visuelle complète : style Slate (sidebar, blanc, épuré)
+ * + Système de droits utilisateurs complet
  *
- * ARCHITECTURE DU FICHIER (à découper en modules par la suite)
- * ------------------------------------------------------------
- * 1. CONFIG          — Constantes, données initiales, helpers
- * 2. STYLES          — CSS global injecté une seule fois
- * 3. HOOKS           — useTicketStorage, useNotifications
- * 4. COMPOSANTS UI   — Overlay, Badge, Toggle, Avatar
- * 5. LOGIN PAGE      — Page d'authentification
- * 6. MODALS          — TicketModal, WorkflowModal, ShareModal, SettingsModal
- * 7. BOARD HEADER    — Header + Menu hamburger
- * 8. KANBAN          — Colonnes + Cartes
- * 9. BOARD           — Composant principal du tableau
- * 10. APP            — Point d'entrée (gestion session)
- *
- * POUR AMÉLIORER :
- * - Chaque section peut devenir un fichier séparé dans src/
- * - Remplacer les styles inline par Tailwind ou CSS Modules
- * - Ajouter TypeScript pour typer Ticket, Member, Priority...
- * - Remplacer window.storage par Supabase pour un vrai backend
+ * NOUVEAUTÉS v2.0
+ * ---------------
+ * - Interface Slate : sidebar fixe, fond blanc, typographie propre
+ * - Onglet Droits utilisateurs : rôles + permissions par écran/action
+ * - 5 rôles combinables : Admin, Éditeur, Validateur, Opérateur, Lecteur
+ * - Restrictions dynamiques selon les droits attribués
  * ============================================================
  */
 
 import { useState, useRef, useEffect, useCallback } from "react";
 
-/**
- * Adaptateur de stockage
- * - En production (Vercel) : utilise localStorage du navigateur
- * - Dans Claude : utilise window.storage (API propriétaire Claude)
- * Cela permet au même code de fonctionner dans les deux environnements.
- */
-const storage = {
-  get: async (key) => {
-    if (window.storage) return window.storage.get(key, true);
-    const value = localStorage.getItem(key);
-    return value ? { value } : null;
-  },
-  set: async (key, value) => {
-    if (window.storage) return window.storage.set(key, value, true);
-    localStorage.setItem(key, value);
-    return { value };
-  },
-  getPrivate: async (key) => {
-    if (window.storage) return window.storage.get(key, false);
-    const value = localStorage.getItem("private_" + key);
-    return value ? { value } : null;
-  },
-  setPrivate: async (key, value) => {
-    if (window.storage) return window.storage.set(key, value, false);
-    localStorage.setItem("private_" + key, value);
-    return { value };
-  },
-};
-
-
 // ============================================================
-// 1. CONFIG — Constantes, données, helpers purs
+// 1. CONFIG
 // ============================================================
 
-/** Liste des membres de l'équipe. À terme : récupéré depuis une API */
 const ACCOUNTS = [
   { id: 1, name: "Alice", avatar: "🦊", color: "#FF6B6B", email: "alice@projectflow.io", password: "alice123" },
   { id: 2, name: "Bruno", avatar: "🐻", color: "#4ECDC4", email: "bruno@projectflow.io", password: "bruno123" },
-  { id: 3, name: "Carla", avatar: "🦋", color: "#FFE66D", email: "carla@projectflow.io", password: "carla123" },
-  { id: 4, name: "David", avatar: "🐬", color: "#A855F7", email: "david@projectflow.io", password: "david123" },
+  { id: 3, name: "Carla", avatar: "🦋", color: "#F59E0B", email: "carla@projectflow.io", password: "carla123" },
+  { id: 4, name: "David", avatar: "🐬", color: "#8B5CF6", email: "david@projectflow.io", password: "david123" },
 ];
 
-/** Niveaux de priorité d'un ticket */
+/** Rôles disponibles — combinables sur un même profil */
+const ROLES = {
+  admin:     { id: "admin",     label: "Admin",      icon: "👑", color: "#1a1a1a", desc: "Accès total à toutes les fonctionnalités" },
+  editor:    { id: "editor",    label: "Éditeur",    icon: "✏️",  color: "#3B5BDB", desc: "Créer et modifier des tickets" },
+  validator: { id: "validator", label: "Validateur", icon: "✅", color: "#2F9E44", desc: "Valider et clôturer des tickets" },
+  operator:  { id: "operator",  label: "Opérateur",  icon: "⚙️",  color: "#E67E22", desc: "Traiter uniquement ses tickets assignés" },
+  reader:    { id: "reader",    label: "Lecteur",    icon: "👁️",  color: "#868E96", desc: "Consulter sans modifier" },
+};
+
+/** Écrans accessibles — restrictibles par rôle */
+const SCREENS = {
+  kanban:    { id: "kanban",    label: "Tableau Kanban",  icon: "📋" },
+  mytickets: { id: "mytickets", label: "Mes tickets",     icon: "🎫" },
+  reports:   { id: "reports",   label: "Rapports & KPI",  icon: "📊" },
+  chat:      { id: "chat",      label: "Chat",            icon: "💬" },
+  settings:  { id: "settings",  label: "Paramètres",      icon: "⚙️"  },
+  admin:     { id: "admin",     label: "Page Admin",      icon: "👤" },
+};
+
+/** Actions restrictibles */
+const ACTIONS = {
+  create_ticket:   { id: "create_ticket",   label: "Créer un ticket",      icon: "➕" },
+  edit_ticket:     { id: "edit_ticket",     label: "Modifier un ticket",   icon: "✏️"  },
+  delete_ticket:   { id: "delete_ticket",   label: "Supprimer un ticket",  icon: "🗑️" },
+  validate_ticket: { id: "validate_ticket", label: "Valider un ticket",    icon: "✅" },
+  transfer_ticket: { id: "transfer_ticket", label: "Transférer un ticket", icon: "🔄" },
+  view_reports:    { id: "view_reports",    label: "Voir les rapports",    icon: "📊" },
+  manage_members:  { id: "manage_members",  label: "Gérer les membres",    icon: "👥" },
+};
+
+/** Droits par défaut selon le rôle */
+const DEFAULT_PERMISSIONS = {
+  admin:     { screens: Object.keys(SCREENS), actions: Object.keys(ACTIONS) },
+  editor:    { screens: ["kanban","mytickets","chat"], actions: ["create_ticket","edit_ticket","transfer_ticket"] },
+  validator: { screens: ["kanban","mytickets","chat"], actions: ["validate_ticket","transfer_ticket"] },
+  operator:  { screens: ["mytickets","chat"], actions: ["edit_ticket","transfer_ticket"] },
+  reader:    { screens: ["kanban","mytickets"], actions: [] },
+};
+
+/** Profils utilisateurs par défaut (Alice = admin) */
+const DEFAULT_USER_PROFILES = {
+  1: { roles: ["admin"],    screens: Object.keys(SCREENS), actions: Object.keys(ACTIONS) },
+  2: { roles: ["editor"],   screens: ["kanban","mytickets","chat"], actions: ["create_ticket","edit_ticket","transfer_ticket"] },
+  3: { roles: ["editor","validator"], screens: ["kanban","mytickets","chat"], actions: ["create_ticket","edit_ticket","validate_ticket","transfer_ticket"] },
+  4: { roles: ["operator"], screens: ["mytickets","chat"], actions: ["edit_ticket","transfer_ticket"] },
+};
+
 const PRIORITIES = [
-  { label: "Critique", color: "#FF3B3B", bg: "#FF3B3B22", icon: "🔥" },
-  { label: "Haute",    color: "#FF8C00", bg: "#FF8C0022", icon: "⚡" },
-  { label: "Moyenne",  color: "#00BFFF", bg: "#00BFFF22", icon: "💧" },
-  { label: "Basse",    color: "#32CD32", bg: "#32CD3222", icon: "🌿" },
+  { label: "Critique", color: "#E03131", bg: "#FFF5F5", icon: "🔥" },
+  { label: "Haute",    color: "#E67E22", bg: "#FFF8F0", icon: "⚡" },
+  { label: "Moyenne",  color: "#3B5BDB", bg: "#EEF2FF", icon: "💧" },
+  { label: "Basse",    color: "#2F9E44", bg: "#EBFBEE", icon: "🌿" },
 ];
 
-/** Colonnes du tableau Kanban (ordre = ordre d'affichage) */
 const COLUMNS = ["À faire", "En cours", "En révision", "Terminé"];
-
-/** Configuration visuelle de chaque colonne */
 const COL_CFG = {
-  "À faire":     { icon: "📋", color: "#6C63FF", bg: "#6C63FF15" },
-  "En cours":    { icon: "⚙️",  color: "#FF8C00", bg: "#FF8C0015" },
-  "En révision": { icon: "🔍", color: "#00BFFF", bg: "#00BFFF15" },
-  "Terminé":     { icon: "✅", color: "#32CD32", bg: "#32CD3215" },
+  "À faire":     { icon: "○", color: "#868E96", bg: "#F8F9FA", dot: "#ADB5BD" },
+  "En cours":    { icon: "◐", color: "#E67E22", bg: "#FFF8F0", dot: "#E67E22" },
+  "En révision": { icon: "◑", color: "#3B5BDB", bg: "#EEF2FF", dot: "#3B5BDB" },
+  "Terminé":     { icon: "●", color: "#2F9E44", bg: "#EBFBEE", dot: "#2F9E44" },
 };
 
-/** Actions disponibles dans le workflow de transfert */
 const WF_ACTIONS = [
-  { label: "Assigner à",             icon: "📨", color: "#6C63FF", type: "assign" },
-  { label: "Renvoyer pour révision", icon: "🔄", color: "#FF8C00", type: "review",     targetStatus: "En révision" },
-  { label: "Demander correction",    icon: "✏️",  color: "#FF3B3B", type: "correction", targetStatus: "À faire" },
-  { label: "Valider & clôturer",     icon: "✅", color: "#32CD32", type: "close",      targetStatus: "Terminé" },
+  { label: "Assigner à",             icon: "📨", color: "#3B5BDB", type: "assign" },
+  { label: "Renvoyer pour révision", icon: "🔄", color: "#E67E22", type: "review",     targetStatus: "En révision" },
+  { label: "Demander correction",    icon: "✏️",  color: "#E03131", type: "correction", targetStatus: "À faire" },
+  { label: "Valider & clôturer",     icon: "✅", color: "#2F9E44", type: "close",      targetStatus: "Terminé" },
 ];
 
-/** Icônes pour les pièces jointes selon leur type MIME */
-const FILE_ICONS = {
-  "image/":        "🖼️",
-  "application/pdf": "📄",
-  "text/":         "📝",
-  "video/":        "🎬",
-  "audio/":        "🎵",
-  default:         "📎",
-};
+const FILE_ICONS = { "image/":"🖼️","application/pdf":"📄","text/":"📝","video/":"🎬","audio/":"🎵",default:"📎" };
+const getFileIcon  = (t="") => { for(const[k,v] of Object.entries(FILE_ICONS)) if(t.startsWith(k)||t===k) return v; return FILE_ICONS.default; };
+const formatSize   = (b) => b<1024?b+" o":b<1048576?(b/1024).toFixed(1)+" Ko":(b/1048576).toFixed(1)+" Mo";
+const getMember    = (id) => ACCOUNTS.find(m=>m.id===id);
+const getPriority  = (l)  => PRIORITIES.find(p=>p.label===l)||PRIORITIES[2];
 
-/** Clé de stockage partagé + intervalle de polling */
-const STORAGE_KEY = "projectflow-v5";
-const POLL_MS     = 3000;
+const STORAGE_KEY         = "projectflow-v6";
+const PROFILES_STORAGE_KEY = "projectflow-profiles-v1";
+const POLL_MS             = 3000;
 
-// ── Helpers purs (sans effet de bord) ──────────────────────
-
-/** Retourne la config d'un membre par son ID */
-const getMember = (id) => ACCOUNTS.find(m => m.id === id);
-
-/** Retourne la config d'une priorité par son libellé */
-const getPriority = (label) => PRIORITIES.find(p => p.label === label) || PRIORITIES[2];
-
-/** Retourne l'icône d'un fichier selon son type MIME */
-const getFileIcon = (type = "") => {
-  for (const [key, icon] of Object.entries(FILE_ICONS)) {
-    if (type.startsWith(key) || type === key) return icon;
-  }
-  return FILE_ICONS.default;
-};
-
-/** Formate une taille en octets en Ko/Mo lisible */
-const formatFileSize = (bytes) => {
-  if (bytes < 1024)    return bytes + " o";
-  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " Ko";
-  return (bytes / 1048576).toFixed(1) + " Mo";
-};
-
-/** Tickets de démonstration chargés au premier lancement */
 const DEFAULT_TICKETS = [
-  {
-    id: 1, title: "Refonte de la homepage",
-    description: "Moderniser l'interface utilisateur",
-    status: "En cours", priority: "Haute", assignee: 1,
-    tags: ["Design", "Frontend"], attachments: [],
-    history: [{ date: Date.now() - 86400000, member: 1, action: "Ticket créé" }],
-    createdAt: Date.now() - 86400000, assignedAt: Date.now() - 86400000,
-  },
-  {
-    id: 2, title: "Corriger bug de connexion",
-    description: "Les utilisateurs sont déconnectés après 5 min",
-    status: "À faire", priority: "Critique", assignee: 2,
-    tags: ["Bug", "Auth"], attachments: [],
-    history: [{ date: Date.now() - 43200000, member: 2, action: "Ticket créé" }],
-    createdAt: Date.now() - 43200000, assignedAt: Date.now() - 43200000,
-  },
-  {
-    id: 3, title: "Intégration API paiement",
-    description: "Connecter Stripe pour les abonnements",
-    status: "En révision", priority: "Haute", assignee: 3,
-    tags: ["Backend"], attachments: [],
-    history: [
-      { date: Date.now() - 7200000, member: 3, action: "Ticket créé" },
-      { date: Date.now() - 3600000, member: 1, action: "Renvoyé pour révision", note: "Vérifier les webhooks" },
-    ],
-    createdAt: Date.now() - 7200000, assignedAt: Date.now() - 3600000,
-  },
-  {
-    id: 4, title: "Documentation technique",
-    description: "Rédiger les guides développeurs",
-    status: "Terminé", priority: "Basse", assignee: 4,
-    tags: ["Docs"], attachments: [],
-    history: [
-      { date: Date.now() - 172800000, member: 4, action: "Ticket créé" },
-      { date: Date.now() - 86400000,  member: 2, action: "Validé & clôturé" },
-    ],
-    createdAt: Date.now() - 172800000, assignedAt: Date.now() - 172800000,
-  },
-  {
-    id: 5, title: "Tests automatisés",
-    description: "Couverture > 80% sur les modules critiques",
-    status: "À faire", priority: "Moyenne", assignee: null,
-    tags: ["Tests"], attachments: [],
-    history: [{ date: Date.now() - 3600000, member: null, action: "Ticket créé" }],
-    createdAt: Date.now() - 3600000, assignedAt: null,
-  },
+  { id:1, title:"Refonte de la homepage",    description:"Moderniser l'interface utilisateur",           status:"En cours",    priority:"Haute",    assignee:1, tags:["Design"],   attachments:[], history:[{date:Date.now()-86400000, member:1, action:"Ticket créé"}],   createdAt:Date.now()-86400000, assignedAt:Date.now()-86400000 },
+  { id:2, title:"Corriger bug de connexion", description:"Déconnexion après 5 min d'inactivité",         status:"À faire",     priority:"Critique", assignee:2, tags:["Bug"],      attachments:[], history:[{date:Date.now()-43200000, member:2, action:"Ticket créé"}],   createdAt:Date.now()-43200000, assignedAt:Date.now()-43200000 },
+  { id:3, title:"Intégration API paiement",  description:"Connecter Stripe pour les abonnements",        status:"En révision", priority:"Haute",    assignee:3, tags:["Backend"],  attachments:[], history:[{date:Date.now()-7200000,  member:3, action:"Ticket créé"}],   createdAt:Date.now()-7200000,  assignedAt:Date.now()-3600000  },
+  { id:4, title:"Documentation technique",   description:"Rédiger les guides développeurs",              status:"Terminé",     priority:"Basse",    assignee:4, tags:["Docs"],     attachments:[], history:[{date:Date.now()-172800000,member:4, action:"Ticket créé"}],   createdAt:Date.now()-172800000,assignedAt:Date.now()-172800000},
+  { id:5, title:"Tests automatisés",         description:"Couverture > 80% sur les modules critiques",   status:"À faire",     priority:"Moyenne",  assignee:null,tags:["Tests"], attachments:[], history:[{date:Date.now()-3600000,  member:null,action:"Ticket créé"}],  createdAt:Date.now()-3600000,  assignedAt:null },
 ];
 
+// ============================================================
+// 2. STORAGE ADAPTER (Claude + Vercel compatible)
+// ============================================================
+
+const storage = {
+  get:        async (key) => { if(window.storage) return window.storage.get(key,true);  const v=localStorage.getItem(key);           return v?{value:v}:null; },
+  set:        async (key,val) => { if(window.storage) return window.storage.set(key,val,true);  localStorage.setItem(key,val);           return {value:val}; },
+  getPrivate: async (key) => { if(window.storage) return window.storage.get(key,false); const v=localStorage.getItem("pv_"+key);      return v?{value:v}:null; },
+  setPrivate: async (key,val) => { if(window.storage) return window.storage.set(key,val,false); localStorage.setItem("pv_"+key,val);      return {value:val}; },
+};
 
 // ============================================================
-// 2. STYLES — CSS global injecté une seule fois dans le DOM
+// 3. STYLES GLOBAUX
 // ============================================================
 
-const GLOBAL_CSS = `
-  @keyframes fadeUp    { from { transform: translateY(30px); opacity: 0 } to { transform: translateY(0); opacity: 1 } }
-  @keyframes float     { 0%,100% { transform: translateY(0) } 50% { transform: translateY(-8px) } }
-  @keyframes spin      { from { transform: rotate(0) } to { transform: rotate(360deg) } }
-  @keyframes slideIn   { from { transform: translateY(20px); opacity: 0 } to { transform: translateY(0); opacity: 1 } }
-  @keyframes pulse     { 0%,100% { opacity: 1 } 50% { opacity: .4 } }
-  @keyframes popIn     { from { transform: scale(.85); opacity: 0 } to { transform: scale(1); opacity: 1 } }
-  @keyframes badgePulse{ 0%,100% { box-shadow: 0 0 0 0 rgba(255,59,59,.6) } 70% { box-shadow: 0 0 0 6px rgba(255,59,59,0) } }
-
-  * { box-sizing: border-box; }
-  select option { background: #1a1740; color: #fff; }
-  ::-webkit-scrollbar { width: 5px; height: 5px; }
-  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.15); border-radius: 3px; }
-  input:-webkit-autofill { -webkit-box-shadow: 0 0 0 30px #1a1740 inset !important; -webkit-text-fill-color: #fff !important; }
-
-  .pf-card:hover {
-    background: rgba(255,255,255,.12) !important;
-    transform: translateY(-2px) !important;
-    box-shadow: 0 8px 24px rgba(0,0,0,.3) !important;
-  }
-  .pf-menu-item:hover { background: rgba(255,255,255,.08) !important; }
-  .pf-btn-primary:hover { transform: scale(1.04); }
+const G = `
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#F4F6F8;color:#1a1a1a}
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+  @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes slideInLeft{from{opacity:0;transform:translateX(-12px)}to{opacity:1;transform:translateX(0)}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  @keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+  @keyframes popIn{from{transform:scale(.92);opacity:0}to{transform:scale(1);opacity:1}}
+  @keyframes badgePop{0%,100%{box-shadow:0 0 0 0 rgba(224,49,49,.5)}70%{box-shadow:0 0 0 5px rgba(224,49,49,0)}}
+  select option{background:#fff;color:#1a1a1a}
+  ::-webkit-scrollbar{width:4px;height:4px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:#D0D5DD;border-radius:2px}
+  input,textarea,select{font-family:inherit}
+  .pf-card-hover:hover{box-shadow:0 4px 16px rgba(0,0,0,.08)!important;border-color:#D0D5DD!important;transform:translateY(-1px)}
+  .pf-sidebar-item:hover{background:#F4F6F8!important;color:#1a1a1a!important}
+  .pf-btn:hover{opacity:.88}
+  .pf-input:focus{border-color:#3B5BDB!important;box-shadow:0 0 0 3px rgba(59,91,219,.1)!important}
+  .pf-checkbox{width:16px;height:16px;accent-color:#3B5BDB;cursor:pointer}
+  .tag-chip{display:inline-flex;align-items:center;gap:4px;background:#F1F3F9;color:#495057;font-size:11px;font-weight:500;padding:2px 8px;border-radius:100px;border:1px solid #E8EAED}
 `;
 
-
 // ============================================================
-// 3. HOOKS — Logique métier isolée et réutilisable
+// 4. HOOKS
 // ============================================================
 
-/**
- * useTicketStorage
- * Gère la persistance partagée des tickets (polling toutes les 3s).
- * À terme : remplacer par un hook Supabase avec subscriptions temps réel.
- */
 function useTicketStorage() {
   const [tickets,  setTickets]  = useState([]);
   const [nextId,   setNextId]   = useState(6);
   const [loading,  setLoading]  = useState(true);
   const [syncing,  setSyncing]  = useState(false);
   const [lastSync, setLastSync] = useState(null);
-  const versionRef = useRef(null);
+  const verRef = useRef(null);
 
-  // Sauvegarde les tickets dans le stockage partagé
   const save = useCallback(async (list, nid) => {
     setSyncing(true);
-    const version = Date.now();
-    versionRef.current = version;
-    await storage.set(STORAGE_KEY, JSON.stringify({ tickets: list, nextId: nid, version }));
+    const ver = Date.now();
+    verRef.current = ver;
+    await storage.set(STORAGE_KEY, JSON.stringify({tickets:list,nextId:nid,ver}));
     setLastSync(new Date());
     setSyncing(false);
-  }, []);
+  },[]);
 
-  // Charge les tickets depuis le stockage partagé (silent = sans MAJ lastSync)
-  const load = useCallback(async (silent = false) => {
+  const load = useCallback(async (silent=false) => {
     try {
-      const result = await storage.get(STORAGE_KEY);
-      if (result?.value) {
-        const data = JSON.parse(result.value);
-        // Ne met à jour que si la version a changé (évite les re-renders inutiles)
-        if (data.version !== versionRef.current) {
-          versionRef.current = data.version;
-          setTickets(data.tickets);
-          setNextId(data.nextId || data.tickets.length + 1);
-          if (!silent) setLastSync(new Date());
+      const r = await storage.get(STORAGE_KEY);
+      if(r?.value){
+        const d = JSON.parse(r.value);
+        if(d.ver !== verRef.current){
+          verRef.current = d.ver;
+          setTickets(d.tickets);
+          setNextId(d.nextId||d.tickets.length+1);
+          if(!silent) setLastSync(new Date());
         }
       } else {
-        // Premier lancement : on charge les données de démo
-        await save(DEFAULT_TICKETS, 6);
+        await save(DEFAULT_TICKETS,6);
         setTickets(DEFAULT_TICKETS);
       }
-    } catch {
-      try { await save(DEFAULT_TICKETS, 6); setTickets(DEFAULT_TICKETS); } catch (_) {}
-    }
+    } catch { try{await save(DEFAULT_TICKETS,6);setTickets(DEFAULT_TICKETS);}catch(_){} }
     setLoading(false);
-  }, [save]);
+  },[save]);
 
-  // Chargement initial
-  useEffect(() => { load(false); }, [load]);
+  useEffect(()=>{load(false);},[load]);
+  useEffect(()=>{ const iv=setInterval(()=>load(true),POLL_MS); return()=>clearInterval(iv); },[load]);
 
-  // Polling toutes les POLL_MS millisecondes pour détecter les changements des autres membres
-  useEffect(() => {
-    const interval = setInterval(() => load(true), POLL_MS);
-    return () => clearInterval(interval);
-  }, [load]);
+  const persist = useCallback(async(list,nid)=>{ setTickets(list); if(nid!==undefined)setNextId(nid); await save(list,nid??nextId); },[save,nextId]);
 
-  // Persiste une nouvelle liste de tickets et met à jour l'état local
-  const persist = useCallback(async (list, nid) => {
-    setTickets(list);
-    if (nid !== undefined) setNextId(nid);
-    await save(list, nid);
-  }, [save]);
-
-  return { tickets, nextId, loading, syncing, lastSync, persist };
+  return {tickets,nextId,loading,syncing,lastSync,persist};
 }
 
-/**
- * useNotifications
- * Détecte les nouveaux tickets assignés depuis la dernière connexion.
- * Utilise le stockage personnel (non partagé) pour stocker la date par membre.
- */
+function useProfiles() {
+  const [profiles, setProfiles] = useState(DEFAULT_USER_PROFILES);
+
+  useEffect(()=>{
+    storage.get(PROFILES_STORAGE_KEY).then(r=>{
+      if(r?.value) setProfiles(JSON.parse(r.value));
+    }).catch(()=>{});
+  },[]);
+
+  const saveProfiles = async (updated) => {
+    setProfiles(updated);
+    await storage.set(PROFILES_STORAGE_KEY, JSON.stringify(updated));
+  };
+
+  const canDo = (userId, action) => {
+    const p = profiles[userId];
+    if(!p) return false;
+    if(p.roles?.includes("admin")) return true;
+    return p.actions?.includes(action) || false;
+  };
+
+  const canSee = (userId, screen) => {
+    const p = profiles[userId];
+    if(!p) return false;
+    if(p.roles?.includes("admin")) return true;
+    return p.screens?.includes(screen) || false;
+  };
+
+  return {profiles, saveProfiles, canDo, canSee};
+}
+
 function useNotifications(currentUser, tickets, loading) {
   const [alertModal,  setAlertModal]  = useState(false);
   const [newTickets,  setNewTickets]  = useState([]);
   const [lastLoginAt, setLastLoginAt] = useState(0);
   const checkedRef = useRef(false);
 
-  useEffect(() => {
-    // Attendre que les tickets soient chargés et que la vérification n'ait pas déjà eu lieu
-    if (loading || tickets.length === 0 || checkedRef.current) return;
+  useEffect(()=>{
+    if(loading||tickets.length===0||checkedRef.current) return;
     checkedRef.current = true;
-
-    const key = `pf-lastlogin-${currentUser.id}`;
-
-    const check = async () => {
-      // Récupère la date de dernière connexion de ce membre
-      let last = 0;
-      try {
-        const r = await storage.getPrivate(key);
-        if (r?.value) last = parseInt(r.value) || 0;
-      } catch (_) {}
-
+    const key = `lastlogin-${currentUser.id}`;
+    const check = async()=>{
+      let last=0;
+      try{ const r=await storage.getPrivate(key); if(r?.value) last=parseInt(r.value)||0; }catch(_){}
       setLastLoginAt(last);
-
-      // Enregistre la connexion actuelle
-      try { await storage.setPrivate(key, String(Date.now())); } catch (_) {}
-
-      // Filtre les tickets assignés à ce membre après sa dernière connexion
-      const fresh = tickets.filter(t =>
-        t.assignee === currentUser.id &&
-        t.status !== "Terminé" &&
-        (t.assignedAt || t.createdAt || 0) > (last > 0 ? last : Date.now() - 30000)
-      );
-
-      if (fresh.length > 0) {
-        setNewTickets(fresh);
-        setAlertModal(true);
-      }
+      try{ await storage.setPrivate(key,String(Date.now())); }catch(_){}
+      const fresh=tickets.filter(t=>t.assignee===currentUser.id&&t.status!=="Terminé"&&(t.assignedAt||t.createdAt||0)>(last>0?last:Date.now()-30000));
+      if(fresh.length>0){setNewTickets(fresh);setAlertModal(true);}
     };
-
     check();
-  }, [loading, tickets, currentUser.id]);
+  },[loading,tickets,currentUser.id]);
 
-  // Détermine si un ticket est "nouveau" pour l'utilisateur courant
-  const isNewForMe = useCallback((ticket) =>
-    ticket.assignee === currentUser.id &&
-    ticket.status !== "Terminé" &&
-    lastLoginAt > 0 &&
-    (ticket.assignedAt || ticket.createdAt || 0) > lastLoginAt,
-  [currentUser.id, lastLoginAt]);
+  const isNewForMe = useCallback((t)=>t.assignee===currentUser.id&&t.status!=="Terminé"&&lastLoginAt>0&&(t.assignedAt||t.createdAt||0)>lastLoginAt,[currentUser.id,lastLoginAt]);
 
-  return { alertModal, setAlertModal, newTickets, isNewForMe };
+  return {alertModal,setAlertModal,newTickets,isNewForMe};
 }
 
-
 // ============================================================
-// 4. COMPOSANTS UI — Briques réutilisables
+// 5. COMPOSANTS UI DE BASE
 // ============================================================
 
-/**
- * Overlay — Fond sombre + conteneur modal centré.
- * Ferme le modal au clic sur le fond, bloque la propagation vers la racine.
- */
-function Overlay({ children, onClose, maxWidth = 520 }) {
+function Overlay({children,onClose,maxWidth=560}) {
   return (
-    <div
-      onClick={(e) => { e.stopPropagation(); onClose(); }}
-      style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.8)", backdropFilter:"blur(10px)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000, padding:20 }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{ background:"linear-gradient(145deg,#1a1740,#251f50)", border:"1px solid rgba(255,255,255,.15)", borderRadius:22, padding:26, width:"100%", maxWidth, boxShadow:"0 30px 80px rgba(0,0,0,.6)", maxHeight:"90vh", overflowY:"auto" }}
-      >
+    <div onClick={e=>{e.stopPropagation();onClose();}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:20}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"#fff",border:"1px solid #E8EAED",borderRadius:16,padding:28,width:"100%",maxWidth,boxShadow:"0 20px 60px rgba(0,0,0,.15)",maxHeight:"90vh",overflowY:"auto",animation:"popIn .2s ease"}}>
         {children}
       </div>
     </div>
   );
 }
 
-/** Avatar circulaire d'un membre */
-function Avatar({ member, size = 22 }) {
-  if (!member) return <span style={{ fontSize: 10, color: "rgba(255,255,255,.3)" }}>—</span>;
-  return (
-    <div
-      title={member.name}
-      style={{ width: size, height: size, borderRadius: "50%", background: member.color + "44", border: `2px solid ${member.color}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.55, flexShrink: 0 }}
-    >
-      {member.avatar}
-    </div>
-  );
+function Badge({children,color="#3B5BDB",bg="#EEF2FF"}) {
+  return <span style={{background:bg,color,fontSize:11,fontWeight:600,padding:"2px 8px",borderRadius:100,border:`1px solid ${color}22`}}>{children}</span>;
 }
 
-/** Badge de priorité coloré */
-function PriorityBadge({ priority }) {
-  const p = getPriority(priority);
-  return (
-    <span style={{ background: p.bg, border: `1px solid ${p.color}55`, borderRadius: 20, padding: "2px 7px", fontSize: 9, fontWeight: 700, color: p.color }}>
-      {p.icon} {p.label}
-    </span>
-  );
+function Btn({children,onClick,variant="primary",size="md",disabled=false,style={}}) {
+  const base={border:"none",borderRadius:8,fontWeight:600,cursor:disabled?"not-allowed":"pointer",transition:"all .15s",fontFamily:"inherit",display:"inline-flex",alignItems:"center",gap:6,...style};
+  const sizes={sm:{padding:"5px 12px",fontSize:12},md:{padding:"8px 16px",fontSize:13},lg:{padding:"10px 20px",fontSize:14}};
+  const variants={
+    primary:{background:disabled?"#E8EAED":"#1a1a1a",color:disabled?"#AAA":"#fff"},
+    secondary:{background:"#fff",color:"#1a1a1a",border:"1px solid #E8EAED"},
+    blue:{background:disabled?"#E8EAED":"#3B5BDB",color:disabled?"#AAA":"#fff"},
+    danger:{background:"#FFF5F5",color:"#E03131",border:"1px solid #FFE3E3"},
+    ghost:{background:"transparent",color:"#666",padding:"6px 10px"},
+  };
+  return <button onClick={!disabled?onClick:undefined} className="pf-btn" style={{...base,...sizes[size],...variants[variant]}} disabled={disabled}>{children}</button>;
 }
 
-/** Toggle on/off (visuel uniquement pour l'instant) */
-function Toggle({ on = true }) {
-  return (
-    <div style={{ width: 40, height: 22, borderRadius: 11, background: on ? "linear-gradient(135deg,#6C63FF,#A855F7)" : "rgba(255,255,255,.15)", flexShrink: 0, position: "relative", cursor: "pointer" }}>
-      <div style={{ position: "absolute", right: on ? 3 : undefined, left: on ? undefined : 3, top: 3, width: 16, height: 16, borderRadius: "50%", background: "#fff", boxShadow: "0 1px 4px rgba(0,0,0,.3)", transition: "all .2s" }} />
-    </div>
-  );
+function Input({value,onChange,placeholder,type="text",style={}}) {
+  return <input type={type} value={value} onChange={onChange} placeholder={placeholder} className="pf-input" style={{width:"100%",border:"1px solid #E8EAED",borderRadius:8,padding:"8px 12px",fontSize:13,color:"#1a1a1a",outline:"none",background:"#fff",transition:"all .2s",...style}}/>;
 }
 
-/** Onglets de navigation (ex: dans les modals) */
-function TabBar({ tabs, active, onChange }) {
-  return (
-    <div style={{ display: "flex", gap: 4, marginBottom: 18, background: "rgba(255,255,255,.05)", borderRadius: 12, padding: 4 }}>
-      {tabs.map(({ id, label }) => (
-        <button
-          key={id}
-          onClick={() => onChange(id)}
-          style={{ flex: 1, background: active === id ? "rgba(108,99,255,.5)" : "transparent", border: active === id ? "1px solid rgba(108,99,255,.6)" : "1px solid transparent", borderRadius: 9, padding: "7px 8px", color: active === id ? "#fff" : "rgba(255,255,255,.5)", fontSize: 12, fontWeight: active === id ? 700 : 400, cursor: "pointer" }}
-        >
-          {label}
-        </button>
-      ))}
-    </div>
-  );
+function SectionTitle({children}) {
+  return <div style={{fontSize:11,fontWeight:700,color:"#ADB5BD",letterSpacing:".8px",textTransform:"uppercase",padding:"12px 16px 4px"}}>{children}</div>;
 }
-
-/** Champ texte stylisé */
-function Field({ label, children }) {
-  return (
-    <div style={{ marginBottom: 13 }}>
-      <label style={{ fontSize: 11, fontWeight: 700, color: "rgba(255,255,255,.55)", display: "block", marginBottom: 5 }}>{label}</label>
-      {children}
-    </div>
-  );
-}
-
-const inputStyle = {
-  width: "100%", background: "rgba(255,255,255,.07)", border: "1px solid rgba(255,255,255,.15)",
-  borderRadius: 11, padding: "9px 13px", color: "#fff", fontSize: 13, outline: "none", boxSizing: "border-box",
-};
-
 
 // ============================================================
-// 5. LOGIN PAGE — Page d'authentification
+// 6. LOGIN
 // ============================================================
 
-function LoginPage({ onLogin }) {
+function LoginPage({onLogin}) {
   const [email,    setEmail]    = useState("");
   const [password, setPassword] = useState("");
   const [error,    setError]    = useState("");
   const [loading,  setLoading]  = useState(false);
   const [showPass, setShowPass] = useState(false);
-  const [focused,  setFocused]  = useState(null);
 
-  const doLogin = async (account) => {
-    // Connexion rapide : l'account est passé directement
-    if (account) { onLogin(account); return; }
-    setError(""); setLoading(true);
-    await new Promise(r => setTimeout(r, 600));
-    const found = ACCOUNTS.find(a =>
-      a.email.toLowerCase() === email.toLowerCase().trim() &&
-      a.password === password
-    );
-    found ? onLogin(found) : setError("Email ou mot de passe incorrect.");
+  const doLogin = async(acc)=>{
+    if(acc){onLogin(acc);return;}
+    setError("");setLoading(true);
+    await new Promise(r=>setTimeout(r,500));
+    const found=ACCOUNTS.find(a=>a.email.toLowerCase()===email.toLowerCase().trim()&&a.password===password);
+    found?onLogin(found):setError("Email ou mot de passe incorrect.");
     setLoading(false);
   };
 
-  const getInputBorder = (field) =>
-    focused === field ? "rgba(108,99,255,.8)" : error ? "rgba(255,59,59,.4)" : "rgba(255,255,255,.15)";
-
   return (
-    <div style={{ minHeight: "100vh", background: "linear-gradient(135deg,#0F0C29 0%,#302B63 50%,#24243e 100%)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Nunito','Segoe UI',sans-serif", padding: 20 }}>
-      <style>{GLOBAL_CSS}</style>
-
-      <div style={{ width: "100%", maxWidth: 420, animation: "fadeUp .5s ease" }}>
+    <div style={{minHeight:"100vh",background:"#F4F6F8",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Inter',-apple-system,sans-serif",padding:20}}>
+      <style>{G}</style>
+      <div style={{width:"100%",maxWidth:400,animation:"fadeIn .4s ease"}}>
         {/* Logo */}
-        <div style={{ textAlign: "center", marginBottom: 36 }}>
-          <div style={{ width: 72, height: 72, borderRadius: 22, background: "linear-gradient(135deg,#6C63FF,#FF6B6B)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 36, boxShadow: "0 8px 32px rgba(108,99,255,.5)", marginBottom: 16, animation: "float 3s ease-in-out infinite" }}>🚀</div>
-          <div style={{ fontWeight: 800, fontSize: 28, color: "#fff", letterSpacing: "-1px" }}>ProjectFlow</div>
-          <div style={{ fontSize: 14, color: "rgba(255,255,255,.45)", marginTop: 6 }}>Connectez-vous à votre espace de travail</div>
+        <div style={{textAlign:"center",marginBottom:32}}>
+          <div style={{width:56,height:56,borderRadius:16,background:"#1a1a1a",display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:26,marginBottom:14,boxShadow:"0 8px 24px rgba(0,0,0,.15)"}}>🚀</div>
+          <div style={{fontWeight:700,fontSize:22,color:"#1a1a1a",letterSpacing:"-.5px"}}>ProjectFlow</div>
+          <div style={{fontSize:13,color:"#868E96",marginTop:4}}>Connectez-vous à votre espace</div>
         </div>
 
-        {/* Carte de login */}
-        <div style={{ background: "rgba(255,255,255,.05)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,.12)", borderRadius: 24, padding: 32, boxShadow: "0 24px 64px rgba(0,0,0,.4)" }}>
-
-          {/* Hint comptes de démo */}
-          <div style={{ background: "rgba(108,99,255,.12)", border: "1px solid rgba(108,99,255,.25)", borderRadius: 12, padding: "10px 14px", marginBottom: 24, fontSize: 12, color: "rgba(255,255,255,.6)" }}>
-            💡 <strong style={{ color: "#A8A0FF" }}>Démo :</strong> alice@projectflow.io / alice123 · bruno / bruno123 · etc.
+        {/* Card */}
+        <div style={{background:"#fff",border:"1px solid #E8EAED",borderRadius:16,padding:28,boxShadow:"0 4px 24px rgba(0,0,0,.06)"}}>
+          {/* Hint */}
+          <div style={{background:"#F8F9FF",border:"1px solid #E0E7FF",borderRadius:10,padding:"10px 14px",marginBottom:22,fontSize:12,color:"#666"}}>
+            💡 <strong style={{color:"#3B5BDB"}}>Démo :</strong> alice@projectflow.io / alice123
           </div>
 
-          {/* Champ email */}
-          <Field label="Adresse e-mail">
-            <input
-              type="email" value={email}
-              onChange={e => { setEmail(e.target.value); setError(""); }}
-              onKeyDown={e => e.key === "Enter" && doLogin()}
-              onFocus={() => setFocused("email")} onBlur={() => setFocused(null)}
-              placeholder="votre@email.com"
-              style={{ ...inputStyle, border: `1.5px solid ${getInputBorder("email")}`, fontSize: 14, padding: "12px 16px" }}
-            />
-          </Field>
+          <div style={{marginBottom:16}}>
+            <label style={{fontSize:12,fontWeight:600,color:"#495057",display:"block",marginBottom:6}}>Adresse e-mail</label>
+            <Input type="email" value={email} onChange={e=>{setEmail(e.target.value);setError("");}} placeholder="votre@email.com"/>
+          </div>
 
-          {/* Champ mot de passe */}
-          <Field label="Mot de passe">
-            <div style={{ position: "relative" }}>
-              <input
-                type={showPass ? "text" : "password"} value={password}
-                onChange={e => { setPassword(e.target.value); setError(""); }}
-                onKeyDown={e => e.key === "Enter" && doLogin()}
-                onFocus={() => setFocused("pass")} onBlur={() => setFocused(null)}
-                placeholder="••••••••"
-                style={{ ...inputStyle, border: `1.5px solid ${getInputBorder("pass")}`, fontSize: 14, padding: "12px 44px 12px 16px" }}
-              />
-              <button onClick={() => setShowPass(s => !s)} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "rgba(255,255,255,.4)", cursor: "pointer", fontSize: 16, padding: 4 }}>
-                {showPass ? "🙈" : "👁️"}
-              </button>
+          <div style={{marginBottom:8}}>
+            <label style={{fontSize:12,fontWeight:600,color:"#495057",display:"block",marginBottom:6}}>Mot de passe</label>
+            <div style={{position:"relative"}}>
+              <Input type={showPass?"text":"password"} value={password} onChange={e=>{setPassword(e.target.value);setError("");}} placeholder="••••••••" style={{paddingRight:40}}/>
+              <button onClick={()=>setShowPass(s=>!s)} style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",fontSize:15,color:"#ADB5BD"}}>{showPass?"🙈":"👁️"}</button>
             </div>
-          </Field>
+          </div>
 
-          {/* Message d'erreur */}
-          {error && (
-            <div style={{ background: "rgba(255,59,59,.15)", border: "1px solid rgba(255,59,59,.3)", borderRadius: 10, padding: "9px 13px", marginBottom: 14, fontSize: 12, color: "#FF8080" }}>
-              ⚠️ {error}
-            </div>
-          )}
+          {error&&<div style={{background:"#FFF5F5",border:"1px solid #FFE3E3",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:12,color:"#E03131"}}>⚠️ {error}</div>}
 
-          {/* Bouton de connexion */}
-          <button
-            onClick={() => doLogin()}
-            disabled={loading || !email || !password}
-            style={{ width: "100%", marginTop: 16, background: (loading || !email || !password) ? "rgba(255,255,255,.1)" : "linear-gradient(135deg,#6C63FF,#FF6B6B)", border: "none", borderRadius: 13, padding: "14px", color: "#fff", fontWeight: 800, fontSize: 15, cursor: (loading || !email || !password) ? "not-allowed" : "pointer", boxShadow: (!loading && email && password) ? "0 6px 24px rgba(108,99,255,.5)" : "none", transition: "all .2s", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, fontFamily: "inherit" }}
-          >
-            {loading
-              ? <><span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>⟳</span> Connexion…</>
-              : "Se connecter →"
-            }
-          </button>
+          <Btn onClick={()=>doLogin()} disabled={loading||!email||!password} variant="primary" size="lg" style={{width:"100%",justifyContent:"center",marginTop:16}}>
+            {loading?<><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>⟳</span> Connexion…</>:"Se connecter →"}
+          </Btn>
 
-          {/* Connexion rapide */}
-          <div style={{ marginTop: 24, borderTop: "1px solid rgba(255,255,255,.08)", paddingTop: 20 }}>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.35)", textAlign: "center", marginBottom: 12, fontWeight: 700, letterSpacing: ".5px" }}>CONNEXION RAPIDE</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-              {ACCOUNTS.map(account => (
-                <button
-                  key={account.id}
-                  onClick={() => doLogin(account)}
-                  style={{ background: account.color + "18", border: `1.5px solid ${account.color}44`, borderRadius: 12, padding: "10px 12px", color: "#fff", fontSize: 12, cursor: "pointer", display: "flex", alignItems: "center", gap: 8, transition: "all .2s", fontFamily: "inherit" }}
-                  onMouseEnter={e => { e.currentTarget.style.background = account.color + "33"; e.currentTarget.style.borderColor = account.color; }}
-                  onMouseLeave={e => { e.currentTarget.style.background = account.color + "18"; e.currentTarget.style.borderColor = account.color + "44"; }}
-                >
-                  <div style={{ width: 28, height: 28, borderRadius: "50%", background: account.color + "33", border: `2px solid ${account.color}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>{account.avatar}</div>
-                  <div style={{ textAlign: "left" }}>
-                    <div style={{ fontWeight: 700, fontSize: 12 }}>{account.name}</div>
-                    <div style={{ fontSize: 9, color: "rgba(255,255,255,.4)" }}>{account.email}</div>
+          {/* Quick login */}
+          <div style={{marginTop:22,borderTop:"1px solid #F1F3F5",paddingTop:18}}>
+            <div style={{fontSize:11,color:"#ADB5BD",textAlign:"center",marginBottom:12,fontWeight:600,letterSpacing:".5px"}}>CONNEXION RAPIDE</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              {ACCOUNTS.map(a=>(
+                <button key={a.id} onClick={()=>doLogin(a)} style={{background:"#F8F9FA",border:"1px solid #E8EAED",borderRadius:10,padding:"9px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:8,transition:"all .15s",fontFamily:"inherit"}}
+                  onMouseEnter={e=>{e.currentTarget.style.borderColor=a.color;e.currentTarget.style.background=a.color+"11";}}
+                  onMouseLeave={e=>{e.currentTarget.style.borderColor="#E8EAED";e.currentTarget.style.background="#F8F9FA";}}>
+                  <div style={{width:28,height:28,borderRadius:"50%",background:a.color+"22",border:`1.5px solid ${a.color}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>{a.avatar}</div>
+                  <div style={{textAlign:"left"}}>
+                    <div style={{fontWeight:600,fontSize:12,color:"#1a1a1a"}}>{a.name}</div>
+                    <div style={{fontSize:9,color:"#ADB5BD"}}>{DEFAULT_USER_PROFILES[a.id]?.roles.map(r=>ROLES[r]?.label).join(", ")}</div>
                   </div>
                 </button>
               ))}
             </div>
           </div>
         </div>
-
-        <div style={{ textAlign: "center", marginTop: 20, fontSize: 11, color: "rgba(255,255,255,.25)" }}>
-          ProjectFlow · Tableau collaboratif partagé
-        </div>
       </div>
     </div>
   );
 }
 
+// ============================================================
+// 7. GESTION DES DROITS UTILISATEURS
+// ============================================================
+
+function UserRightsPanel({profiles, onSave, currentUser}) {
+  const [selectedUser, setSelectedUser] = useState(ACCOUNTS[0].id);
+  const [draft,        setDraft]        = useState(null);
+  const [saved,        setSaved]        = useState(false);
+
+  useEffect(()=>{
+    const p = profiles[selectedUser] || {roles:[],screens:[],actions:[]};
+    setDraft({...p, roles:[...(p.roles||[])], screens:[...(p.screens||[])], actions:[...(p.actions||[])]});
+  },[selectedUser,profiles]);
+
+  const toggleRole = (roleId) => {
+    setDraft(d=>{
+      const has = d.roles.includes(roleId);
+      const roles = has ? d.roles.filter(r=>r!==roleId) : [...d.roles, roleId];
+      // Auto-apply default permissions when adding a role
+      if(!has){
+        const def = DEFAULT_PERMISSIONS[roleId];
+        const screens = [...new Set([...d.screens,...def.screens])];
+        const actions = [...new Set([...d.actions,...def.actions])];
+        return {...d,roles,screens,actions};
+      }
+      return {...d,roles};
+    });
+  };
+
+  const toggleScreen = (screenId) => {
+    setDraft(d=>{
+      const has = d.screens.includes(screenId);
+      return {...d,screens: has?d.screens.filter(s=>s!==screenId):[...d.screens,screenId]};
+    });
+  };
+
+  const toggleAction = (actionId) => {
+    setDraft(d=>{
+      const has = d.actions.includes(actionId);
+      return {...d,actions: has?d.actions.filter(a=>a!==actionId):[...d.actions,actionId]};
+    });
+  };
+
+  const handleSave = async() => {
+    await onSave({...profiles,[selectedUser]:draft});
+    setSaved(true);
+    setTimeout(()=>setSaved(false),2000);
+  };
+
+  const member = getMember(selectedUser);
+  const isAdmin = draft?.roles?.includes("admin");
+
+  return (
+    <div style={{display:"flex",gap:0,height:"100%",animation:"fadeIn .3s ease"}}>
+
+      {/* Liste des membres */}
+      <div style={{width:220,borderRight:"1px solid #F1F3F5",flexShrink:0}}>
+        <div style={{padding:"16px 16px 8px",borderBottom:"1px solid #F1F3F5"}}>
+          <div style={{fontWeight:700,fontSize:14,color:"#1a1a1a"}}>Membres</div>
+          <div style={{fontSize:12,color:"#ADB5BD",marginTop:2}}>Cliquez pour modifier les droits</div>
+        </div>
+        {ACCOUNTS.map(acc=>{
+          const p = profiles[acc.id]||{roles:[]};
+          const isSelected = selectedUser === acc.id;
+          return (
+            <div key={acc.id} onClick={()=>setSelectedUser(acc.id)}
+              style={{padding:"12px 16px",cursor:"pointer",background:isSelected?"#F0F4FF":"transparent",borderLeft:`3px solid ${isSelected?"#3B5BDB":"transparent"}`,transition:"all .15s"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <div style={{width:34,height:34,borderRadius:"50%",background:acc.color+"22",border:`1.5px solid ${acc.color}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>{acc.avatar}</div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:600,fontSize:13,color:"#1a1a1a"}}>{acc.name}</div>
+                  <div style={{fontSize:10,color:"#ADB5BD",marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                    {(p.roles||[]).map(r=>ROLES[r]?.label).join(", ")||"Aucun rôle"}
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Éditeur de droits */}
+      {draft && (
+        <div style={{flex:1,padding:"20px 24px",overflowY:"auto"}}>
+          {/* En-tête membre sélectionné */}
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:24,paddingBottom:16,borderBottom:"1px solid #F1F3F5"}}>
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              <div style={{width:44,height:44,borderRadius:"50%",background:member.color+"22",border:`2px solid ${member.color}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>{member.avatar}</div>
+              <div>
+                <div style={{fontWeight:700,fontSize:16,color:"#1a1a1a"}}>{member.name}</div>
+                <div style={{fontSize:12,color:"#ADB5BD"}}>{member.email}</div>
+              </div>
+            </div>
+            <Btn onClick={handleSave} variant="blue" size="sm">
+              {saved?"✅ Sauvegardé !":"💾 Sauvegarder"}
+            </Btn>
+          </div>
+
+          {/* ── Section Rôles */}
+          <div style={{marginBottom:24}}>
+            <div style={{fontWeight:700,fontSize:13,color:"#1a1a1a",marginBottom:4}}>Rôles attribués</div>
+            <div style={{fontSize:12,color:"#ADB5BD",marginBottom:14}}>Plusieurs rôles peuvent être combinés sur un même profil</div>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {Object.values(ROLES).map(role=>{
+                const active = draft.roles.includes(role.id);
+                return (
+                  <div key={role.id} onClick={()=>toggleRole(role.id)}
+                    style={{display:"flex",alignItems:"center",gap:14,padding:"12px 16px",border:`1.5px solid ${active?role.color+"66":"#E8EAED"}`,borderRadius:10,cursor:"pointer",background:active?role.color+"08":"#fff",transition:"all .15s"}}>
+                    <input type="checkbox" checked={active} onChange={()=>{}} className="pf-checkbox"/>
+                    <div style={{width:32,height:32,borderRadius:8,background:active?role.color+"22":"#F8F9FA",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>{role.icon}</div>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:600,fontSize:13,color:active?role.color:"#1a1a1a"}}>{role.label}</div>
+                      <div style={{fontSize:11,color:"#ADB5BD",marginTop:1}}>{role.desc}</div>
+                    </div>
+                    {active&&<Badge color={role.color} bg={role.color+"15"}>Actif</Badge>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* ── Section Écrans */}
+          <div style={{marginBottom:24}}>
+            <div style={{fontWeight:700,fontSize:13,color:"#1a1a1a",marginBottom:4}}>Accès aux écrans</div>
+            <div style={{fontSize:12,color:"#ADB5BD",marginBottom:14}}>
+              {isAdmin?"L'Admin a accès à tous les écrans automatiquement":"Choisissez les écrans visibles pour ce profil"}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              {Object.values(SCREENS).map(screen=>{
+                const active = isAdmin || draft.screens.includes(screen.id);
+                return (
+                  <div key={screen.id} onClick={()=>!isAdmin&&toggleScreen(screen.id)}
+                    style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",border:`1px solid ${active?"#3B5BDB44":"#E8EAED"}`,borderRadius:8,cursor:isAdmin?"default":"pointer",background:active?"#F0F4FF":"#fff",opacity:isAdmin&&screen.id!=="admin"?0.7:1,transition:"all .15s"}}>
+                    <input type="checkbox" checked={active} onChange={()=>{}} className="pf-checkbox" disabled={isAdmin}/>
+                    <span style={{fontSize:15}}>{screen.icon}</span>
+                    <span style={{fontSize:12,fontWeight:500,color:active?"#3B5BDB":"#495057"}}>{screen.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* ── Section Actions */}
+          <div style={{marginBottom:8}}>
+            <div style={{fontWeight:700,fontSize:13,color:"#1a1a1a",marginBottom:4}}>Permissions d'actions</div>
+            <div style={{fontSize:12,color:"#ADB5BD",marginBottom:14}}>
+              {isAdmin?"L'Admin peut effectuer toutes les actions":"Définissez ce que ce profil peut faire"}
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {Object.values(ACTIONS).map(action=>{
+                const active = isAdmin || draft.actions.includes(action.id);
+                return (
+                  <div key={action.id} onClick={()=>!isAdmin&&toggleAction(action.id)}
+                    style={{display:"flex",alignItems:"center",gap:12,padding:"9px 14px",border:`1px solid ${active?"#2F9E4444":"#E8EAED"}`,borderRadius:8,cursor:isAdmin?"default":"pointer",background:active?"#F3FBF4":"#fff",transition:"all .15s"}}>
+                    <input type="checkbox" checked={active} onChange={()=>{}} className="pf-checkbox" disabled={isAdmin}/>
+                    <span style={{fontSize:14}}>{action.icon}</span>
+                    <span style={{fontSize:12,fontWeight:500,color:active?"#2F9E44":"#495057"}}>{action.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ============================================================
-// 6. MODALS
+// 8. TICKET MODAL
 // ============================================================
 
-// ── 6a. Modal Ticket (création + édition) ────────────────────
-
-function TicketModal({ ticket, currentUser, onSave, onDelete, onClose, onOpenWorkflow, onOpenShare }) {
+function TicketModal({ticket,currentUser,onSave,onDelete,onClose,onOpenWorkflow,onOpenShare,canDo}) {
   const isCreate = !ticket.id;
-
-  const [form,     setForm]     = useState({ ...ticket, tags: [...(ticket.tags || [])], attachments: [...(ticket.attachments || [])], history: [...(ticket.history || [])] });
+  const [form,     setForm]     = useState({...ticket,tags:[...(ticket.tags||[])],attachments:[...(ticket.attachments||[])],history:[...(ticket.history||[])]});
   const [tab,      setTab]      = useState("details");
   const [tagInput, setTagInput] = useState("");
   const fileRef = useRef(null);
 
-  const updateForm = (key, value) => setForm(f => ({ ...f, [key]: value }));
+  const upd = (k,v) => setForm(f=>({...f,[k]:v}));
+  const addTag    = () => { const t=tagInput.trim(); if(t&&!form.tags.includes(t)) upd("tags",[...form.tags,t]); setTagInput(""); };
+  const removeTag = t  => upd("tags",form.tags.filter(x=>x!==t));
 
-  // ── Tags
-  const addTag    = () => { const t = tagInput.trim(); if (t && !form.tags.includes(t)) updateForm("tags", [...form.tags, t]); setTagInput(""); };
-  const removeTag = (t) => updateForm("tags", form.tags.filter(x => x !== t));
+  const handleFiles = files => Array.from(files).forEach(f=>{
+    if(f.size>5*1024*1024) return;
+    const r=new FileReader();
+    r.onload=ev=>setForm(fm=>({...fm,attachments:[...fm.attachments,{id:Date.now()+Math.random(),name:f.name,size:f.size,type:f.type,dataUrl:ev.target.result,addedAt:Date.now()}]}));
+    r.readAsDataURL(f);
+  });
 
-  // ── Pièces jointes
-  const handleFiles = (files) => {
-    Array.from(files).forEach(file => {
-      if (file.size > 5 * 1024 * 1024) return;
-      const reader = new FileReader();
-      reader.onload = (ev) => setForm(f => ({
-        ...f,
-        attachments: [...f.attachments, { id: Date.now() + Math.random(), name: file.name, size: file.size, type: file.type, dataUrl: ev.target.result, addedAt: Date.now() }],
-      }));
-      reader.readAsDataURL(file);
-    });
-  };
-  const removeAtt    = (id) => updateForm("attachments", form.attachments.filter(a => a.id !== id));
-  const downloadAtt  = (att) => { const a = document.createElement("a"); a.href = att.dataUrl; a.download = att.name; a.click(); };
+  const TABS = [{id:"details",label:"Détails"},{id:"attachments",label:`Pièces jointes${form.attachments?.length?` (${form.attachments.length})`:""}`},{id:"history",label:"Historique"}];
 
-  const TABS = [
-    { id: "details",     label: "📋 Détails" },
-    { id: "attachments", label: `📎 PJ${form.attachments?.length ? ` (${form.attachments.length})` : ""}` },
-    { id: "history",     label: "🕐 Historique" },
-  ];
+  const labelStyle = {fontSize:12,fontWeight:600,color:"#495057",display:"block",marginBottom:6};
+  const selectStyle = {width:"100%",border:"1px solid #E8EAED",borderRadius:8,padding:"8px 12px",fontSize:13,color:"#1a1a1a",outline:"none",background:"#fff"};
 
   return (
     <Overlay onClose={onClose}>
-      {/* Titre */}
-      <div style={{ fontWeight: 800, fontSize: 17, marginBottom: 18 }}>
-        {isCreate ? "✨ Nouveau ticket" : "✏️ Modifier le ticket"}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+        <div style={{fontWeight:700,fontSize:16,color:"#1a1a1a"}}>{isCreate?"Nouveau ticket":"Modifier le ticket"}{!isCreate&&<span style={{fontSize:12,color:"#ADB5BD",fontWeight:400,marginLeft:8}}>#{ticket.id}</span>}</div>
+        <button onClick={onClose} style={{background:"#F8F9FA",border:"1px solid #E8EAED",borderRadius:8,width:28,height:28,cursor:"pointer",fontSize:14,color:"#666",display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
       </div>
 
-      <TabBar tabs={TABS} active={tab} onChange={setTab} />
+      {/* Tabs */}
+      <div style={{display:"flex",gap:0,marginBottom:20,borderBottom:"1px solid #F1F3F5"}}>
+        {TABS.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"8px 16px",background:"none",border:"none",borderBottom:`2px solid ${tab===t.id?"#3B5BDB":"transparent"}`,color:tab===t.id?"#3B5BDB":"#868E96",fontSize:13,fontWeight:tab===t.id?600:400,cursor:"pointer",transition:"all .15s",fontFamily:"inherit"}}>
+            {t.label}
+          </button>
+        ))}
+      </div>
 
-      {/* ── Onglet Détails */}
-      {tab === "details" && (
-        <>
-          <Field label="Titre *">
-            <input value={form.title} onChange={e => updateForm("title", e.target.value)} placeholder="Ex : Corriger le bug de login" style={inputStyle} />
-          </Field>
-          <Field label="Description">
-            <textarea value={form.description || ""} onChange={e => updateForm("description", e.target.value)} placeholder="Décrivez le ticket…" rows={3} style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} />
-          </Field>
-
-          {/* Statut + Priorité */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 11, marginBottom: 13 }}>
-            <Field label="Statut">
-              <select value={form.status} onChange={e => updateForm("status", e.target.value)} style={{ ...inputStyle, fontSize: 12 }}>
-                {COLUMNS.map(c => <option key={c} value={c}>{COL_CFG[c].icon} {c}</option>)}
-              </select>
-            </Field>
-            <Field label="Priorité">
-              <select value={form.priority} onChange={e => updateForm("priority", e.target.value)} style={{ ...inputStyle, fontSize: 12 }}>
-                {PRIORITIES.map(p => <option key={p.label} value={p.label}>{p.icon} {p.label}</option>)}
-              </select>
-            </Field>
+      {/* Détails */}
+      {tab==="details"&&(<>
+        <div style={{marginBottom:14}}>
+          <label style={labelStyle}>Titre *</label>
+          <Input value={form.title} onChange={e=>upd("title",e.target.value)} placeholder="Ex : Corriger le bug de login"/>
+        </div>
+        <div style={{marginBottom:14}}>
+          <label style={labelStyle}>Description</label>
+          <textarea value={form.description||""} onChange={e=>upd("description",e.target.value)} placeholder="Décrivez le ticket…" rows={3} className="pf-input" style={{...{width:"100%",border:"1px solid #E8EAED",borderRadius:8,padding:"8px 12px",fontSize:13,color:"#1a1a1a",outline:"none",background:"#fff"},resize:"vertical",fontFamily:"inherit"}}/>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+          <div>
+            <label style={labelStyle}>Statut</label>
+            <select value={form.status||"À faire"} onChange={e=>upd("status",e.target.value)} style={selectStyle}>
+              {COLUMNS.map(c=><option key={c} value={c}>{COL_CFG[c].icon} {c}</option>)}
+            </select>
           </div>
-
-          {/* Assignation */}
-          <Field label="Assigné à">
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              <button onClick={() => { updateForm("assignee", null); updateForm("assignedAt", null); }}
-                style={{ background: !form.assignee ? "rgba(255,255,255,.2)" : "rgba(255,255,255,.07)", border: `2px solid ${!form.assignee ? "rgba(255,255,255,.5)" : "rgba(255,255,255,.1)"}`, borderRadius: 20, padding: "4px 10px", color: "#fff", fontSize: 11, cursor: "pointer" }}>
-                Non assigné
+          <div>
+            <label style={labelStyle}>Priorité</label>
+            <select value={form.priority||"Moyenne"} onChange={e=>upd("priority",e.target.value)} style={selectStyle}>
+              {PRIORITIES.map(p=><option key={p.label} value={p.label}>{p.icon} {p.label}</option>)}
+            </select>
+          </div>
+        </div>
+        <div style={{marginBottom:14}}>
+          <label style={labelStyle}>Assigné à</label>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            <button onClick={()=>{upd("assignee",null);upd("assignedAt",null);}} style={{background:!form.assignee?"#1a1a1a":"#F8F9FA",color:!form.assignee?"#fff":"#495057",border:"1px solid #E8EAED",borderRadius:20,padding:"5px 12px",fontSize:12,cursor:"pointer",fontWeight:500}}>Non assigné</button>
+            {ACCOUNTS.map(m=>(
+              <button key={m.id} onClick={()=>{upd("assignee",m.id);upd("assignedAt",Date.now());}} style={{background:form.assignee===m.id?m.color+"22":"#F8F9FA",border:`1.5px solid ${form.assignee===m.id?m.color:"#E8EAED"}`,borderRadius:20,padding:"5px 12px",fontSize:12,cursor:"pointer",display:"flex",alignItems:"center",gap:5,fontWeight:500,color:form.assignee===m.id?m.color:"#495057"}}>
+                <span>{m.avatar}</span>{m.name}{m.id===currentUser.id?" (moi)":""}
               </button>
-              {ACCOUNTS.map(m => (
-                <button key={m.id} onClick={() => { updateForm("assignee", m.id); updateForm("assignedAt", Date.now()); }}
-                  style={{ background: form.assignee === m.id ? m.color + "33" : "rgba(255,255,255,.07)", border: `2px solid ${form.assignee === m.id ? m.color : "rgba(255,255,255,.1)"}`, borderRadius: 20, padding: "4px 10px", color: "#fff", fontSize: 11, cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
-                  <span>{m.avatar}</span>{m.name}{m.id === currentUser.id ? " (moi)" : ""}
-                </button>
-              ))}
-            </div>
-          </Field>
-
-          {/* Tags */}
-          <Field label="Tags">
-            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
-              {form.tags.map(tag => (
-                <span key={tag} style={{ background: "rgba(108,99,255,.25)", border: "1px solid rgba(108,99,255,.4)", borderRadius: 6, padding: "1px 7px", fontSize: 10, color: "#A8A0FF", display: "flex", alignItems: "center", gap: 3 }}>
-                  {tag}
-                  <button onClick={() => removeTag(tag)} style={{ background: "none", border: "none", color: "#A8A0FF", cursor: "pointer", fontSize: 12, padding: 0 }}>×</button>
-                </span>
-              ))}
-            </div>
-            <div style={{ display: "flex", gap: 6 }}>
-              <input value={tagInput} onChange={e => setTagInput(e.target.value)} onKeyDown={e => e.key === "Enter" && addTag()} placeholder="Ajouter un tag…" style={{ ...inputStyle, flex: 1, padding: "6px 11px", fontSize: 12 }} />
-              <button onClick={addTag} style={{ background: "rgba(108,99,255,.3)", border: "1px solid rgba(108,99,255,.5)", borderRadius: 9, padding: "6px 12px", color: "#A8A0FF", fontSize: 11, cursor: "pointer", fontWeight: 700 }}>+ Tag</button>
-            </div>
-          </Field>
-        </>
-      )}
-
-      {/* ── Onglet Pièces jointes */}
-      {tab === "attachments" && (
-        <div>
-          <input ref={fileRef} type="file" multiple style={{ display: "none" }} onChange={e => handleFiles(e.target.files)} />
-
-          {/* Zone de drop */}
-          <div
-            onClick={() => fileRef.current?.click()}
-            onDragOver={e => { e.preventDefault(); e.currentTarget.style.borderColor = "#6C63FF"; }}
-            onDragLeave={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,.15)"; }}
-            onDrop={e => { e.preventDefault(); e.currentTarget.style.borderColor = "rgba(255,255,255,.15)"; handleFiles(e.dataTransfer.files); }}
-            style={{ border: "2px dashed rgba(255,255,255,.15)", borderRadius: 14, padding: "24px 20px", textAlign: "center", cursor: "pointer", background: "rgba(255,255,255,.03)", transition: "all .2s", marginBottom: 14 }}
-          >
-            <div style={{ fontSize: 28, marginBottom: 6 }}>📎</div>
-            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>Glissez vos fichiers ici</div>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)" }}>ou cliquez · Max 5 Mo par fichier</div>
+            ))}
           </div>
+        </div>
+        <div style={{marginBottom:14}}>
+          <label style={labelStyle}>Tags</label>
+          <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:8}}>
+            {form.tags.map(tag=><span key={tag} className="tag-chip">{tag}<button onClick={()=>removeTag(tag)} style={{background:"none",border:"none",cursor:"pointer",fontSize:11,color:"#ADB5BD",padding:0,lineHeight:1}}>×</button></span>)}
+          </div>
+          <div style={{display:"flex",gap:6}}>
+            <Input value={tagInput} onChange={e=>setTagInput(e.target.value)} placeholder="Ajouter un tag…" style={{fontSize:12}}/>
+            <Btn onClick={addTag} variant="secondary" size="sm">+ Tag</Btn>
+          </div>
+        </div>
+      </>)}
 
-          {/* Liste des fichiers */}
-          {form.attachments.length === 0
-            ? <div style={{ textAlign: "center", color: "rgba(255,255,255,.3)", fontSize: 13, padding: "14px 0" }}>Aucune pièce jointe</div>
-            : form.attachments.map(att => (
-              <div key={att.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", borderRadius: 11, padding: "9px 12px", marginBottom: 8 }}>
-                {att.type?.startsWith("image/") && att.dataUrl
-                  ? <img src={att.dataUrl} alt={att.name} style={{ width: 34, height: 34, borderRadius: 7, objectFit: "cover" }} />
-                  : <div style={{ width: 34, height: 34, borderRadius: 7, background: "rgba(108,99,255,.2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>{getFileIcon(att.type)}</div>
-                }
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{att.name}</div>
-                  <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)" }}>{formatFileSize(att.size)}</div>
-                </div>
-                <button onClick={() => downloadAtt(att)} style={{ background: "rgba(108,99,255,.25)", border: "1px solid rgba(108,99,255,.4)", borderRadius: 7, padding: "4px 8px", color: "#A8A0FF", fontSize: 11, cursor: "pointer" }}>⬇️</button>
-                <button onClick={() => removeAtt(att.id)} style={{ background: "rgba(255,59,59,.15)", border: "1px solid rgba(255,59,59,.3)", borderRadius: 7, padding: "4px 8px", color: "#FF6B6B", fontSize: 11, cursor: "pointer" }}>×</button>
+      {/* Pièces jointes */}
+      {tab==="attachments"&&(
+        <div>
+          <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>handleFiles(e.target.files)}/>
+          <div onClick={()=>fileRef.current?.click()} onDragOver={e=>{e.preventDefault();}} onDrop={e=>{e.preventDefault();handleFiles(e.dataTransfer.files);}}
+            style={{border:"2px dashed #E8EAED",borderRadius:12,padding:"24px",textAlign:"center",cursor:"pointer",background:"#FAFAFA",marginBottom:14,transition:"all .2s"}}
+            onMouseEnter={e=>e.currentTarget.style.borderColor="#3B5BDB"}
+            onMouseLeave={e=>e.currentTarget.style.borderColor="#E8EAED"}>
+            <div style={{fontSize:24,marginBottom:6}}>📎</div>
+            <div style={{fontWeight:600,fontSize:13,color:"#495057",marginBottom:2}}>Glissez vos fichiers ici</div>
+            <div style={{fontSize:11,color:"#ADB5BD"}}>ou cliquez pour parcourir · Max 5 Mo</div>
+          </div>
+          {form.attachments.length===0
+            ?<div style={{textAlign:"center",color:"#ADB5BD",fontSize:13,padding:"12px 0"}}>Aucune pièce jointe</div>
+            :form.attachments.map(att=>(
+              <div key={att.id} style={{display:"flex",alignItems:"center",gap:10,border:"1px solid #E8EAED",borderRadius:10,padding:"9px 12px",marginBottom:8,background:"#FAFAFA"}}>
+                {att.type?.startsWith("image/")&&att.dataUrl?<img src={att.dataUrl} alt={att.name} style={{width:32,height:32,borderRadius:6,objectFit:"cover"}}/>:<div style={{width:32,height:32,borderRadius:6,background:"#EEF2FF",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15}}>{getFileIcon(att.type)}</div>}
+                <div style={{flex:1,minWidth:0}}><div style={{fontWeight:500,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{att.name}</div><div style={{fontSize:10,color:"#ADB5BD"}}>{formatSize(att.size)}</div></div>
+                <Btn onClick={()=>{const a=document.createElement("a");a.href=att.dataUrl;a.download=att.name;a.click();}} variant="ghost" size="sm">⬇️</Btn>
+                <Btn onClick={()=>upd("attachments",form.attachments.filter(a=>a.id!==att.id))} variant="danger" size="sm">×</Btn>
               </div>
             ))
           }
         </div>
       )}
 
-      {/* ── Onglet Historique */}
-      {tab === "history" && (
+      {/* Historique */}
+      {tab==="history"&&(
         <div>
-          {form.history.length === 0
-            ? <div style={{ textAlign: "center", color: "rgba(255,255,255,.3)", fontSize: 13, padding: "28px 0" }}>Aucun historique</div>
-            : [...form.history].reverse().map((entry, i) => {
-              const m = getMember(entry.member);
-              return (
-                <div key={i} style={{ display: "flex", gap: 11, paddingBottom: 13, position: "relative" }}>
-                  {i < form.history.length - 1 && <div style={{ position: "absolute", left: 13, top: 27, width: 2, height: "calc(100% - 10px)", background: "rgba(255,255,255,.08)" }} />}
-                  <Avatar member={m} size={26} />
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600 }}>{entry.action}</div>
-                    {entry.note && <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginTop: 2, fontStyle: "italic" }}>💬 "{entry.note}"</div>}
-                    <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", marginTop: 2 }}>
-                      {m?.name || "Système"} · {new Date(entry.date).toLocaleString("fr-FR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
-                    </div>
+          {form.history.length===0
+            ?<div style={{textAlign:"center",color:"#ADB5BD",fontSize:13,padding:"28px 0"}}>Aucun historique</div>
+            :[...form.history].reverse().map((h,i)=>{
+              const m=getMember(h.member);
+              return(
+                <div key={i} style={{display:"flex",gap:12,paddingBottom:14,position:"relative"}}>
+                  {i<form.history.length-1&&<div style={{position:"absolute",left:14,top:28,width:1,height:"calc(100% - 10px)",background:"#F1F3F5"}}/>}
+                  <div style={{width:28,height:28,borderRadius:"50%",background:m?m.color+"22":"#F8F9FA",border:`1.5px solid ${m?m.color:"#E8EAED"}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,flexShrink:0}}>{m?m.avatar:"?"}</div>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:12,fontWeight:600,color:"#1a1a1a"}}>{h.action}</div>
+                    {h.note&&<div style={{fontSize:11,color:"#868E96",marginTop:2,fontStyle:"italic"}}>💬 "{h.note}"</div>}
+                    <div style={{fontSize:10,color:"#ADB5BD",marginTop:2}}>{m?.name||"Système"} · {new Date(h.date).toLocaleString("fr-FR",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"})}</div>
                   </div>
                 </div>
               );
@@ -731,536 +687,207 @@ function TicketModal({ ticket, currentUser, onSave, onDelete, onClose, onOpenWor
       )}
 
       {/* Footer */}
-      <div style={{ display: "flex", gap: 8, justifyContent: "space-between", marginTop: 18, borderTop: "1px solid rgba(255,255,255,.08)", paddingTop: 16 }}>
-        {!isCreate && (
-          <button onClick={() => onDelete(form.id)} style={{ background: "rgba(255,59,59,.15)", border: "1px solid rgba(255,59,59,.4)", borderRadius: 11, padding: "9px 14px", color: "#FF6B6B", fontSize: 12, cursor: "pointer", fontWeight: 700 }}>
-            🗑 Supprimer
-          </button>
-        )}
-        <div style={{ display: "flex", gap: 7, marginLeft: "auto" }}>
-          {!isCreate && (
-            <>
-              <button onClick={() => { onClose(); onOpenWorkflow(form); }} style={{ background: "rgba(108,99,255,.2)", border: "1px solid rgba(108,99,255,.4)", borderRadius: 11, padding: "9px 13px", color: "#A8A0FF", fontSize: 12, cursor: "pointer", fontWeight: 700 }}>🔄 Workflow</button>
-              <button onClick={() => { onClose(); onOpenShare(form); }} style={{ background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 11, padding: "9px 13px", color: "rgba(255,255,255,.7)", fontSize: 12, cursor: "pointer" }}>🔗 Partager</button>
-            </>
-          )}
-          <button onClick={onClose} style={{ background: "rgba(255,255,255,.07)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 11, padding: "9px 13px", color: "rgba(255,255,255,.7)", fontSize: 12, cursor: "pointer" }}>Annuler</button>
-          <button
-            onClick={() => form.title.trim() && onSave(form)}
-            disabled={!form.title.trim()}
-            style={{ background: form.title.trim() ? "linear-gradient(135deg,#6C63FF,#FF6B6B)" : "rgba(255,255,255,.1)", border: "none", borderRadius: 11, padding: "9px 16px", color: "#fff", fontSize: 12, cursor: form.title.trim() ? "pointer" : "not-allowed", fontWeight: 700 }}
-          >
-            {isCreate ? "✨ Créer" : "💾 Sauvegarder"}
-          </button>
+      <div style={{display:"flex",gap:8,justifyContent:"space-between",marginTop:20,paddingTop:16,borderTop:"1px solid #F1F3F5"}}>
+        {!isCreate&&canDo("delete_ticket")&&<Btn onClick={()=>onDelete(form.id)} variant="danger" size="sm">🗑 Supprimer</Btn>}
+        <div style={{display:"flex",gap:7,marginLeft:"auto"}}>
+          {!isCreate&&<><Btn onClick={()=>{onClose();onOpenWorkflow(form);}} variant="secondary" size="sm">🔄 Workflow</Btn><Btn onClick={()=>{onClose();onOpenShare(form);}} variant="secondary" size="sm">🔗 Partager</Btn></>}
+          <Btn onClick={onClose} variant="secondary" size="sm">Annuler</Btn>
+          <Btn onClick={()=>form.title.trim()&&onSave(form)} disabled={!form.title.trim()} variant="blue" size="sm">{isCreate?"Créer le ticket":"Sauvegarder"}</Btn>
         </div>
       </div>
     </Overlay>
   );
 }
 
-// ── 6b. Modal Workflow ────────────────────────────────────────
+// ============================================================
+// 9. WORKFLOW MODAL
+// ============================================================
 
-function WorkflowModal({ ticket, currentUser, onApply, onClose }) {
-  const [action,  setAction]  = useState(null);
-  const [target,  setTarget]  = useState(ticket.assignee);
-  const [note,    setNote]    = useState("");
+function WorkflowModal({ticket,currentUser,onApply,onClose}) {
+  const [action, setAction] = useState(null);
+  const [target, setTarget] = useState(ticket.assignee);
+  const [note,   setNote]   = useState("");
 
-  const handleApply = () => {
-    if (!action) return;
-    onApply({ ticket, action, targetMemberId: target, note });
-  };
+  const handleApply = ()=>{ if(!action) return; onApply({ticket,action,targetMemberId:target,note}); };
 
   return (
-    <Overlay onClose={onClose}>
-      <div style={{ fontWeight: 800, fontSize: 17, marginBottom: 5 }}>🔄 Workflow</div>
-      <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginBottom: 16 }}>#{ticket.id} · {ticket.title}</div>
+    <Overlay onClose={onClose} maxWidth={460}>
+      <div style={{fontWeight:700,fontSize:16,marginBottom:4}}>Workflow</div>
+      <div style={{fontSize:12,color:"#ADB5BD",marginBottom:18}}>#{ticket.id} · {ticket.title}</div>
 
-      {/* État actuel */}
-      <div style={{ display: "flex", gap: 10, marginBottom: 16, background: "rgba(255,255,255,.04)", borderRadius: 12, padding: "11px 14px" }}>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)", marginBottom: 2 }}>STATUT</div>
-          <div style={{ fontSize: 13, fontWeight: 700 }}>{COL_CFG[ticket.status]?.icon} {ticket.status}</div>
-        </div>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)", marginBottom: 2 }}>ASSIGNÉ</div>
-          {getMember(ticket.assignee)
-            ? <div style={{ fontSize: 13, fontWeight: 700 }}>{getMember(ticket.assignee).avatar} {getMember(ticket.assignee).name}</div>
-            : <div style={{ fontSize: 13, color: "rgba(255,255,255,.4)" }}>Non assigné</div>
-          }
-        </div>
+      <div style={{display:"flex",gap:10,marginBottom:18,background:"#F8F9FA",borderRadius:10,padding:"12px 14px"}}>
+        <div style={{flex:1}}><div style={{fontSize:10,color:"#ADB5BD",marginBottom:2,fontWeight:600,letterSpacing:".5px"}}>STATUT</div><div style={{fontSize:13,fontWeight:600}}>{COL_CFG[ticket.status]?.icon} {ticket.status}</div></div>
+        <div style={{flex:1}}><div style={{fontSize:10,color:"#ADB5BD",marginBottom:2,fontWeight:600,letterSpacing:".5px"}}>ASSIGNÉ</div>{getMember(ticket.assignee)?<div style={{fontSize:13,fontWeight:600}}>{getMember(ticket.assignee).avatar} {getMember(ticket.assignee).name}</div>:<div style={{fontSize:13,color:"#ADB5BD"}}>Non assigné</div>}</div>
       </div>
 
-      {/* Étape 1 : Action */}
-      <Field label="1️⃣ Action">
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {WF_ACTIONS.map(a => (
-            <button
-              key={a.type}
-              onClick={() => setAction(a)}
-              style={{ background: action?.type === a.type ? a.color + "33" : "rgba(255,255,255,.05)", border: `2px solid ${action?.type === a.type ? a.color : "rgba(255,255,255,.1)"}`, borderRadius: 11, padding: "10px 13px", color: "#fff", fontSize: 13, cursor: "pointer", textAlign: "left", display: "flex", alignItems: "center", gap: 10, fontWeight: action?.type === a.type ? 700 : 400 }}
-            >
-              <span style={{ fontSize: 16 }}>{a.icon}</span>
+      <div style={{marginBottom:16}}>
+        <label style={{fontSize:12,fontWeight:600,color:"#495057",display:"block",marginBottom:8}}>1 — Action</label>
+        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+          {WF_ACTIONS.map(a=>(
+            <div key={a.type} onClick={()=>setAction(a)} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 14px",border:`1.5px solid ${action?.type===a.type?a.color:"#E8EAED"}`,borderRadius:10,cursor:"pointer",background:action?.type===a.type?a.color+"08":"#fff",transition:"all .15s"}}>
+              <span style={{fontSize:18}}>{a.icon}</span>
               <div>
-                <div style={{ fontWeight: 600 }}>{a.label}</div>
-                {a.targetStatus && <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)", marginTop: 1 }}>→ {COL_CFG[a.targetStatus]?.icon} {a.targetStatus}</div>}
+                <div style={{fontWeight:600,fontSize:13,color:action?.type===a.type?a.color:"#1a1a1a"}}>{a.label}</div>
+                {a.targetStatus&&<div style={{fontSize:11,color:"#ADB5BD",marginTop:1}}>→ {a.targetStatus}</div>}
               </div>
-            </button>
+              {action?.type===a.type&&<div style={{marginLeft:"auto",width:8,height:8,borderRadius:"50%",background:a.color}}/>}
+            </div>
           ))}
         </div>
-      </Field>
+      </div>
 
-      {/* Étape 2 + 3 (visibles après sélection d'une action) */}
-      {action && (
-        <>
-          <Field label="2️⃣ Assigner à">
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {ACCOUNTS.map(m => (
-                <button key={m.id} onClick={() => setTarget(m.id)}
-                  style={{ background: target === m.id ? m.color + "33" : "rgba(255,255,255,.07)", border: `2px solid ${target === m.id ? m.color : "rgba(255,255,255,.1)"}`, borderRadius: 20, padding: "5px 10px", color: "#fff", fontSize: 11, cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
-                  <span>{m.avatar}</span>{m.name}{m.id === currentUser.id ? " (moi)" : ""}
-                </button>
-              ))}
-            </div>
-          </Field>
-
-          <Field label="3️⃣ Message (optionnel)">
-            <textarea value={note} onChange={e => setNote(e.target.value)} placeholder="Ex : Merci de revoir les tests…" rows={2} style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit", fontSize: 12 }} />
-          </Field>
-
-          {/* Aperçu */}
-          <div style={{ background: "rgba(108,99,255,.1)", border: "1px solid rgba(108,99,255,.3)", borderRadius: 11, padding: "9px 13px", marginBottom: 14, fontSize: 12, color: "rgba(255,255,255,.7)" }}>
-            <strong style={{ color: "#A8A0FF" }}>Aperçu :</strong> {action.icon} {action.label}
-            {target ? ` → ${getMember(target)?.avatar} ${getMember(target)?.name}` : ""}
-            {action.targetStatus ? ` · ${COL_CFG[action.targetStatus]?.icon} ${action.targetStatus}` : ""}
-            {note ? ` · 💬 "${note}"` : ""}
+      {action&&<>
+        <div style={{marginBottom:14}}>
+          <label style={{fontSize:12,fontWeight:600,color:"#495057",display:"block",marginBottom:8}}>2 — Assigner à</label>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            {ACCOUNTS.map(m=>(
+              <button key={m.id} onClick={()=>setTarget(m.id)} style={{background:target===m.id?m.color+"22":"#F8F9FA",border:`1.5px solid ${target===m.id?m.color:"#E8EAED"}`,borderRadius:20,padding:"5px 12px",fontSize:12,cursor:"pointer",display:"flex",alignItems:"center",gap:5,fontWeight:500,color:target===m.id?m.color:"#495057"}}>
+                <span>{m.avatar}</span>{m.name}{m.id===currentUser.id?" (moi)":""}
+              </button>
+            ))}
           </div>
-        </>
-      )}
+        </div>
+        <div style={{marginBottom:16}}>
+          <label style={{fontSize:12,fontWeight:600,color:"#495057",display:"block",marginBottom:6}}>3 — Message (optionnel)</label>
+          <textarea value={note} onChange={e=>setNote(e.target.value)} placeholder="Ex : Merci de revoir les tests…" rows={2} style={{width:"100%",border:"1px solid #E8EAED",borderRadius:8,padding:"8px 12px",fontSize:13,outline:"none",resize:"vertical",fontFamily:"inherit",background:"#fff"}}/>
+        </div>
+        <div style={{background:"#F8F9FF",border:"1px solid #E0E7FF",borderRadius:8,padding:"10px 14px",marginBottom:16,fontSize:12,color:"#495057"}}>
+          <strong style={{color:"#3B5BDB"}}>Aperçu :</strong> {action.icon} {action.label}{target?` → ${getMember(target)?.avatar} ${getMember(target)?.name}`:""}
+          {action.targetStatus?` · → ${action.targetStatus}`:""}
+          {note?` · 💬 "${note}"`:""}
+        </div>
+      </>}
 
-      {/* Footer */}
-      <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={onClose} style={{ flex: 1, background: "rgba(255,255,255,.07)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 11, padding: "10px", color: "rgba(255,255,255,.6)", fontSize: 12, cursor: "pointer" }}>Annuler</button>
-        <button
-          onClick={handleApply}
-          onTouchEnd={e => { e.stopPropagation(); handleApply(); }}
-          disabled={!action}
-          style={{ flex: 2, background: action ? "linear-gradient(135deg,#6C63FF,#FF6B6B)" : "rgba(255,255,255,.1)", border: "none", borderRadius: 11, padding: "10px", color: "#fff", fontSize: 12, cursor: action ? "pointer" : "not-allowed", fontWeight: 700 }}
-        >
-          {action ? `${action.icon} Appliquer` : "Choisir une action"}
-        </button>
+      <div style={{display:"flex",gap:8}}>
+        <Btn onClick={onClose} variant="secondary" style={{flex:1,justifyContent:"center"}}>Annuler</Btn>
+        <Btn onClick={handleApply} onTouchEnd={e=>{e.stopPropagation();handleApply();}} disabled={!action} variant="blue" style={{flex:2,justifyContent:"center"}}>
+          {action?`${action.icon} Appliquer`:"Choisir une action"}
+        </Btn>
       </div>
     </Overlay>
   );
 }
 
-// ── 6c. Modal Partage ─────────────────────────────────────────
+// ============================================================
+// 10. SHARE MODAL
+// ============================================================
 
-function ShareModal({ ticket, onClose }) {
+function ShareModal({ticket,onClose}) {
   const member = getMember(ticket.assignee);
-
-  const copyToClipboard = () => {
-    navigator.clipboard.writeText(
-      `Ticket #${ticket.id} — ${ticket.title}\nStatut : ${ticket.status} | Priorité : ${ticket.priority}\n${ticket.description || ""}`
-    );
-    onClose();
-  };
-
-  const sendByEmail = () => {
-    const subject = encodeURIComponent(`[ProjectFlow] Ticket #${ticket.id} : ${ticket.title}`);
-    const body    = encodeURIComponent(`Bonjour${member ? " " + member.name : ""},\n\nTicket à traiter :\n📌 ${ticket.title}\n📋 ${ticket.status}\n⚡ ${ticket.priority}\n${ticket.description || ""}\n\nCordialement`);
-    window.open(`mailto:${member?.email || ""}?subject=${subject}&body=${body}`);
-  };
-
-  const rows = [
-    ["📌", ticket.title],
-    ["📋", `${COL_CFG[ticket.status]?.icon} ${ticket.status}`],
-    ["⚡", `${getPriority(ticket.priority).icon} ${ticket.priority}`],
-    ["👤", member?.name || "Non assigné"],
-    ticket.tags?.length    ? ["🏷️", ticket.tags.join(", ")] : null,
-    ticket.attachments?.length ? ["📎", `${ticket.attachments.length} fichier(s)`] : null,
-  ].filter(Boolean);
+  const copy   = ()=>{ navigator.clipboard.writeText(`Ticket #${ticket.id} — ${ticket.title}\nStatut : ${ticket.status} | Priorité : ${ticket.priority}\n${ticket.description||""}`); onClose(); };
+  const email  = ()=>{ window.open(`mailto:${member?.email||""}?subject=${encodeURIComponent(`[ProjectFlow] Ticket #${ticket.id} : ${ticket.title}`)}&body=${encodeURIComponent(`Bonjour${member?" "+member.name:""},\n\nTicket à traiter :\n📌 ${ticket.title}\n📋 ${ticket.status}\n⚡ ${ticket.priority}\n${ticket.description||""}\n\nCordialement`)}`); };
 
   return (
-    <Overlay onClose={onClose} maxWidth={420}>
-      <div style={{ fontWeight: 800, fontSize: 17, marginBottom: 5 }}>🔗 Partager le ticket</div>
-      <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginBottom: 16 }}>#{ticket.id} · {ticket.title}</div>
-
-      {/* Résumé */}
-      <div style={{ background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 12, padding: "13px 15px", marginBottom: 14 }}>
-        {rows.map(([icon, value]) => (
-          <div key={icon} style={{ display: "flex", gap: 8, marginBottom: 5 }}>
-            <span style={{ fontSize: 11, color: "rgba(255,255,255,.4)", minWidth: 24 }}>{icon}</span>
-            <span style={{ fontSize: 11, fontWeight: 600 }}>{value}</span>
-          </div>
+    <Overlay onClose={onClose} maxWidth={400}>
+      <div style={{fontWeight:700,fontSize:16,marginBottom:4}}>Partager le ticket</div>
+      <div style={{fontSize:12,color:"#ADB5BD",marginBottom:18}}>#{ticket.id} · {ticket.title}</div>
+      <div style={{background:"#F8F9FA",border:"1px solid #E8EAED",borderRadius:10,padding:"14px",marginBottom:14}}>
+        {[["📌",ticket.title],["📋",ticket.status],["⚡",`${getPriority(ticket.priority).icon} ${ticket.priority}`],["👤",member?.name||"Non assigné"],ticket.tags?.length?["🏷️",ticket.tags.join(", ")]:null].filter(Boolean).map(([k,v])=>(
+          <div key={k} style={{display:"flex",gap:10,marginBottom:6}}><span style={{fontSize:12,color:"#ADB5BD",minWidth:20}}>{k}</span><span style={{fontSize:12,fontWeight:500}}>{v}</span></div>
         ))}
       </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        <button onClick={copyToClipboard} style={{ background: "rgba(108,99,255,.25)", border: "1px solid rgba(108,99,255,.4)", borderRadius: 12, padding: "12px", color: "#fff", fontSize: 13, cursor: "pointer", fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-          📋 Copier le résumé
-        </button>
-        <button onClick={sendByEmail} style={{ background: "rgba(255,255,255,.07)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 12, padding: "12px", color: "#fff", fontSize: 13, cursor: "pointer", fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-          ✉️ Envoyer par e-mail
-        </button>
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        <Btn onClick={copy} variant="primary" style={{justifyContent:"center"}}>📋 Copier le résumé</Btn>
+        <Btn onClick={email} variant="secondary" style={{justifyContent:"center"}}>✉️ Envoyer par e-mail</Btn>
       </div>
-      <button onClick={onClose} style={{ marginTop: 12, width: "100%", background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", borderRadius: 11, padding: "9px", color: "rgba(255,255,255,.5)", fontSize: 12, cursor: "pointer" }}>Fermer</button>
+      <Btn onClick={onClose} variant="ghost" style={{width:"100%",justifyContent:"center",marginTop:10,color:"#ADB5BD"}}>Fermer</Btn>
     </Overlay>
   );
 }
 
-// ── 6d. Modal Paramètres ──────────────────────────────────────
+// ============================================================
+// 11. ALERT MODAL (nouveaux tickets à la connexion)
+// ============================================================
 
-function SettingsModal({ currentUser, onClose }) {
-  const [tab, setTab] = useState("general");
-
-  const TABS = [
-    { id: "general",  label: "🏠 Général" },
-    { id: "board",    label: "📋 Tableau",  soon: true },
-    { id: "members",  label: "👥 Membres",  soon: true },
-    { id: "notifs",   label: "🔔 Notifs",   soon: true },
-  ];
-
-  const COMING_SOON = [
-    { icon: "🎨", label: "Personnaliser les colonnes",  desc: "Couleurs, icônes, noms, ordre" },
-    { icon: "👤", label: "Droits utilisateurs",         desc: "Admin, éditeur, lecteur seul" },
-    { icon: "🔔", label: "Notifications e-mail",        desc: "Alertes lors des transferts" },
-    { icon: "📊", label: "Rapports & statistiques",     desc: "Suivi par membre et période" },
-    { icon: "🌐", label: "Langues",                     desc: "Français, Anglais, Espagnol" },
-  ];
-
-  const ACTIVE_FEATURES = [
-    { label: "Alerte de nouveaux tickets à la connexion", desc: "Pop-up listant les tickets assignés depuis votre dernière visite" },
-    { label: "Badge 'NEW' sur les nouvelles cartes",      desc: "Surligne les tickets récemment assignés" },
-    { label: "Bannière 'À vous de jouer'",                desc: "Vos tickets en attente en haut du tableau" },
-  ];
-
+function AlertModal({currentUser,tickets,onViewTicket,onClose}) {
   return (
-    <Overlay onClose={onClose} maxWidth={520}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
-        <div style={{ fontWeight: 800, fontSize: 18 }}>⚙️ Paramètres</div>
-        <button onClick={onClose} style={{ background: "rgba(255,255,255,.1)", border: "none", borderRadius: 9, width: 30, height: 30, color: "#fff", fontSize: 16, cursor: "pointer" }}>×</button>
-      </div>
-
-      {/* Onglets */}
-      <div style={{ display: "flex", gap: 3, marginBottom: 22, background: "rgba(255,255,255,.05)", borderRadius: 12, padding: 4, overflowX: "auto" }}>
-        {TABS.map(t => (
-          <button key={t.id} onClick={() => !t.soon && setTab(t.id)}
-            style={{ flex: "0 0 auto", background: tab === t.id ? "rgba(108,99,255,.5)" : "transparent", border: tab === t.id ? "1px solid rgba(108,99,255,.6)" : "1px solid transparent", borderRadius: 9, padding: "7px 14px", color: t.soon ? "rgba(255,255,255,.3)" : tab === t.id ? "#fff" : "rgba(255,255,255,.6)", fontSize: 12, fontWeight: tab === t.id ? 700 : 400, cursor: t.soon ? "default" : "pointer", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 6 }}>
-            {t.label}
-            {t.soon && <span style={{ background: "rgba(255,255,255,.08)", borderRadius: 5, padding: "0 5px", fontSize: 8, color: "rgba(255,255,255,.3)" }}>bientôt</span>}
-          </button>
-        ))}
-      </div>
-
-      {tab === "general" && (
-        <div>
-          {/* Profil */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: "rgba(255,255,255,.4)", letterSpacing: ".7px", marginBottom: 12 }}>MON PROFIL</div>
-            <div style={{ background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", borderRadius: 14, padding: 16, display: "flex", alignItems: "center", gap: 14 }}>
-              <div style={{ width: 52, height: 52, borderRadius: "50%", background: currentUser.color + "33", border: `3px solid ${currentUser.color}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26 }}>{currentUser.avatar}</div>
-              <div>
-                <div style={{ fontWeight: 800, fontSize: 16 }}>{currentUser.name}</div>
-                <div style={{ fontSize: 12, color: "rgba(255,255,255,.45)", marginTop: 2 }}>{currentUser.email}</div>
-                <div style={{ display: "inline-block", background: currentUser.color + "22", border: `1px solid ${currentUser.color}44`, borderRadius: 6, padding: "2px 8px", fontSize: 10, color: currentUser.color, marginTop: 6, fontWeight: 700 }}>Membre actif</div>
-              </div>
-            </div>
-          </div>
-
-          {/* Fonctionnalités actives */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: "rgba(255,255,255,.4)", letterSpacing: ".7px", marginBottom: 12 }}>FONCTIONNALITÉS ACTIVES</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {ACTIVE_FEATURES.map((item, i) => (
-                <div key={i} style={{ background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 12, padding: "12px 15px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                  <div>
-                    <div style={{ fontSize: 13, fontWeight: 600 }}>{item.label}</div>
-                    <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", marginTop: 2 }}>{item.desc}</div>
-                  </div>
-                  <Toggle on={true} />
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* À venir */}
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 700, color: "rgba(255,255,255,.4)", letterSpacing: ".7px", marginBottom: 12 }}>À VENIR</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {COMING_SOON.map((item, i) => (
-                <div key={i} style={{ background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.06)", borderRadius: 12, padding: "11px 14px", display: "flex", alignItems: "center", gap: 12, opacity: .6 }}>
-                  <span style={{ fontSize: 18 }}>{item.icon}</span>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600 }}>{item.label}</div>
-                    <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", marginTop: 1 }}>{item.desc}</div>
-                  </div>
-                  <span style={{ background: "rgba(255,255,255,.08)", borderRadius: 6, padding: "2px 8px", fontSize: 9, fontWeight: 700, color: "rgba(255,255,255,.35)", whiteSpace: "nowrap" }}>bientôt</span>
-                </div>
-              ))}
-            </div>
-          </div>
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:2000,padding:20}}>
+      <div style={{background:"#fff",border:"1px solid #E8EAED",borderRadius:16,padding:28,width:"100%",maxWidth:480,boxShadow:"0 20px 60px rgba(0,0,0,.15)",animation:"popIn .25s ease"}}>
+        <div style={{textAlign:"center",marginBottom:20}}>
+          <div style={{fontSize:40,marginBottom:8}}>🔔</div>
+          <div style={{fontWeight:700,fontSize:18,color:"#1a1a1a",marginBottom:4}}>Bonjour {currentUser.avatar} {currentUser.name} !</div>
+          <div style={{fontSize:13,color:"#868E96"}}>{tickets.length === 1?"Un nouveau ticket vous a été assigné":"${tickets.length} nouveaux tickets vous ont été assignés"} depuis votre dernière connexion</div>
         </div>
-      )}
-
-      <div style={{ marginTop: 22, borderTop: "1px solid rgba(255,255,255,.08)", paddingTop: 16, display: "flex", justifyContent: "flex-end" }}>
-        <button onClick={onClose} style={{ background: "linear-gradient(135deg,#6C63FF,#FF6B6B)", border: "none", borderRadius: 11, padding: "10px 22px", color: "#fff", fontSize: 13, cursor: "pointer", fontWeight: 700 }}>Fermer</button>
-      </div>
-    </Overlay>
-  );
-}
-
-// ── 6e. Modal Alerte (nouveaux tickets à la connexion) ────────
-
-function AlertModal({ currentUser, tickets, onViewTicket, onClose }) {
-  return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", backdropFilter: "blur(12px)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2000, padding: 20 }}>
-      <div style={{ background: "linear-gradient(145deg,#1a1740,#251f50)", border: `2px solid ${currentUser.color}66`, borderRadius: 24, padding: 28, width: "100%", maxWidth: 460, boxShadow: `0 0 60px ${currentUser.color}33`, animation: "popIn .35s ease" }}>
-
-        {/* En-tête */}
-        <div style={{ textAlign: "center", marginBottom: 20 }}>
-          <div style={{ fontSize: 48, marginBottom: 8 }}>🔔</div>
-          <div style={{ fontWeight: 800, fontSize: 20, marginBottom: 4 }}>Bonjour {currentUser.avatar} {currentUser.name} !</div>
-          <div style={{ fontSize: 13, color: "rgba(255,255,255,.6)" }}>
-            {tickets.length === 1
-              ? "Un nouveau ticket vous a été assigné depuis votre dernière connexion"
-              : `${tickets.length} nouveaux tickets vous ont été assignés depuis votre dernière connexion`
-            }
-          </div>
-        </div>
-
-        {/* Liste des tickets */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20, maxHeight: 280, overflowY: "auto" }}>
-          {tickets.map(t => {
-            const prio = getPriority(t.priority);
-            const from = getMember(t.history?.filter(h => h.action.includes("créé") || h.action.includes("Transféré")).slice(-1)[0]?.member);
-            return (
-              <div key={t.id} style={{ background: "rgba(255,255,255,.06)", border: `1px solid ${currentUser.color}33`, borderRadius: 14, padding: "12px 14px", display: "flex", alignItems: "center", gap: 12 }}>
-                <div style={{ width: 6, minHeight: 40, background: prio.color, borderRadius: 3, flexShrink: 0 }} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 3 }}>{t.title}</div>
-                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                    <PriorityBadge priority={t.priority} />
-                    <span style={{ background: COL_CFG[t.status]?.bg, border: `1px solid ${COL_CFG[t.status]?.color}44`, borderRadius: 20, padding: "1px 7px", fontSize: 10, color: COL_CFG[t.status]?.color }}>{COL_CFG[t.status]?.icon} {t.status}</span>
-                    {from && <span style={{ fontSize: 10, color: "rgba(255,255,255,.4)" }}>de {from.avatar} {from.name}</span>}
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20,maxHeight:260,overflowY:"auto"}}>
+          {tickets.map(t=>{
+            const prio=getPriority(t.priority);
+            const from=getMember(t.history?.slice().reverse().find(h=>h.action.includes("créé")||h.action.includes("Transféré"))?.member);
+            return(
+              <div key={t.id} style={{display:"flex",alignItems:"center",gap:12,border:"1px solid #E8EAED",borderRadius:10,padding:"12px 14px",background:"#FAFAFA"}}>
+                <div style={{width:4,minHeight:40,background:prio.color,borderRadius:2,flexShrink:0}}/>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:600,fontSize:13,marginBottom:3}}>{t.title}</div>
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                    <Badge color={prio.color} bg={prio.bg}>{prio.icon} {prio.label}</Badge>
+                    {from&&<span style={{fontSize:11,color:"#ADB5BD"}}>de {from.avatar} {from.name}</span>}
                   </div>
                 </div>
-                <button onClick={() => onViewTicket(t)} style={{ background: currentUser.color + "33", border: `1px solid ${currentUser.color}`, borderRadius: 9, padding: "5px 10px", color: "#fff", fontSize: 11, cursor: "pointer", fontWeight: 700, whiteSpace: "nowrap" }}>
-                  Voir →
-                </button>
+                <Btn onClick={()=>onViewTicket(t)} variant="secondary" size="sm">Voir →</Btn>
               </div>
             );
           })}
         </div>
-
-        <button onClick={onClose} style={{ width: "100%", background: `linear-gradient(135deg,${currentUser.color},#6C63FF)`, border: "none", borderRadius: 13, padding: "13px", color: "#fff", fontWeight: 800, fontSize: 14, cursor: "pointer" }}>
-          Accéder au tableau →
-        </button>
+        <Btn onClick={onClose} variant="primary" style={{width:"100%",justifyContent:"center"}}>Accéder au tableau →</Btn>
       </div>
     </div>
   );
 }
 
-
 // ============================================================
-// 7. BOARD HEADER — Header + Menu hamburger
-// ============================================================
-
-function BoardHeader({ currentUser, syncing, lastSync, myTickets, search, filtPrio, filtMember, isNewForMe, onSearch, onFiltPrio, onFiltMember, onCreate, onLogout, onSettings, onFilterMyTickets, onFilterAll }) {
-  const [open, setOpen] = useState(false);
-
-  const newCount = myTickets.filter(t => isNewForMe(t)).length;
-
-  return (
-    <div style={{ background: "rgba(255,255,255,.05)", backdropFilter: "blur(20px)", borderBottom: "1px solid rgba(255,255,255,.1)", padding: "13px 22px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, position: "sticky", top: 0, zIndex: 100 }}>
-
-      {/* Gauche : Hamburger + Logo */}
-      <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
-
-        {/* ☰ Menu hamburger */}
-        <div style={{ position: "relative" }} onClick={e => e.stopPropagation()}>
-          <button
-            onClick={() => setOpen(s => !s)}
-            style={{ width: 38, height: 38, borderRadius: 11, background: open ? "rgba(108,99,255,.4)" : "rgba(255,255,255,.08)", border: `1.5px solid ${open ? "rgba(108,99,255,.7)" : "rgba(255,255,255,.15)"}`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 5, cursor: "pointer", transition: "all .2s", position: "relative" }}
-          >
-            {[0, 1, 2].map(i => (
-              <div key={i} style={{ width: 15, height: 2, background: "#fff", borderRadius: 2, transition: "all .25s", transform: open && i === 0 ? "rotate(45deg) translate(5px,5px)" : open && i === 2 ? "rotate(-45deg) translate(5px,-5px)" : "none", opacity: open && i === 1 ? 0 : 1 }} />
-            ))}
-            {/* Badge nouveaux tickets */}
-            {newCount > 0 && !open && (
-              <div style={{ position: "absolute", top: -4, right: -4, width: 16, height: 16, borderRadius: "50%", background: "#FF3B3B", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 800, animation: "badgePulse 1.5s infinite" }}>{newCount}</div>
-            )}
-          </button>
-
-          {/* Menu déroulant */}
-          {open && (
-            <div style={{ position: "absolute", left: 0, top: "calc(100% + 10px)", background: "linear-gradient(145deg,#1a1740,#251f50)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 16, padding: 8, minWidth: 230, boxShadow: "0 20px 60px rgba(0,0,0,.6)", zIndex: 300 }}>
-
-              {/* Section : Navigation */}
-              <div style={{ padding: "8px 12px 6px", borderBottom: "1px solid rgba(255,255,255,.08)", marginBottom: 4 }}>
-                <div style={{ fontSize: 9, fontWeight: 700, color: "rgba(255,255,255,.35)", letterSpacing: ".8px" }}>NAVIGATION</div>
-              </div>
-              {[
-                { icon: "🎫", label: "Mes tickets", badge: myTickets.length || null, action: () => { onFilterMyTickets(); setOpen(false); } },
-                { icon: "👥", label: "Tous les tickets",                              action: () => { onFilterAll(); setOpen(false); } },
-              ].map((item, i) => (
-                <button key={i} onClick={item.action} className="pf-menu-item" style={{ width: "100%", background: "none", border: "none", borderRadius: 10, padding: "9px 12px", color: "rgba(255,255,255,.85)", fontSize: 13, cursor: "pointer", textAlign: "left", display: "flex", alignItems: "center", gap: 10, fontFamily: "inherit", transition: "background .15s" }}>
-                  <span style={{ fontSize: 16 }}>{item.icon}</span>
-                  <span style={{ flex: 1 }}>{item.label}</span>
-                  {item.badge && <span style={{ background: "#6C63FF", borderRadius: 20, padding: "1px 8px", fontSize: 10, fontWeight: 700 }}>{item.badge}</span>}
-                </button>
-              ))}
-
-              {/* Section : Configuration */}
-              <div style={{ borderTop: "1px solid rgba(255,255,255,.08)", margin: "6px 0", padding: "8px 12px 4px" }}>
-                <div style={{ fontSize: 9, fontWeight: 700, color: "rgba(255,255,255,.35)", letterSpacing: ".8px" }}>CONFIGURATION</div>
-              </div>
-              {[
-                { icon: "⚙️",  label: "Paramètres",        action: () => { onSettings(); setOpen(false); } },
-                { icon: "🎨", label: "Personnalisation",    soon: true },
-                { icon: "👤", label: "Droits utilisateurs", soon: true },
-                { icon: "🔔", label: "Notifications",       soon: true },
-              ].map((item, i) => (
-                <button key={i} onClick={!item.soon ? item.action : undefined} className={!item.soon ? "pf-menu-item" : ""} style={{ width: "100%", background: "none", border: "none", borderRadius: 10, padding: "9px 12px", color: item.soon ? "rgba(255,255,255,.3)" : "rgba(255,255,255,.85)", fontSize: 13, cursor: item.soon ? "default" : "pointer", textAlign: "left", display: "flex", alignItems: "center", gap: 10, fontFamily: "inherit", transition: "background .15s" }}>
-                  <span style={{ fontSize: 16 }}>{item.icon}</span>
-                  <span style={{ flex: 1 }}>{item.label}</span>
-                  {item.soon && <span style={{ background: "rgba(255,255,255,.08)", borderRadius: 6, padding: "1px 7px", fontSize: 9, fontWeight: 700, color: "rgba(255,255,255,.35)" }}>bientôt</span>}
-                </button>
-              ))}
-
-              {/* Section : Compte */}
-              <div style={{ borderTop: "1px solid rgba(255,255,255,.08)", margin: "6px 0", padding: "8px 12px 4px" }}>
-                <div style={{ fontSize: 9, fontWeight: 700, color: "rgba(255,255,255,.35)", letterSpacing: ".8px" }}>COMPTE</div>
-              </div>
-              <div style={{ padding: "8px 12px", display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
-                <div style={{ width: 30, height: 30, borderRadius: "50%", background: currentUser.color + "33", border: `2px solid ${currentUser.color}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15 }}>{currentUser.avatar}</div>
-                <div>
-                  <div style={{ fontSize: 12, fontWeight: 700 }}>{currentUser.name}</div>
-                  <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)" }}>{currentUser.email}</div>
-                </div>
-              </div>
-              <button onClick={() => { setOpen(false); onLogout(); }} className="pf-menu-item" style={{ width: "100%", background: "rgba(255,59,59,.1)", border: "1px solid rgba(255,59,59,.25)", borderRadius: 10, padding: "9px 12px", color: "#FF8080", fontSize: 13, cursor: "pointer", textAlign: "left", display: "flex", alignItems: "center", gap: 10, fontWeight: 700, fontFamily: "inherit", transition: "background .15s", marginTop: 2 }}>
-                <span style={{ fontSize: 16 }}>🚪</span> Se déconnecter
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Logo */}
-        <div style={{ width: 38, height: 38, borderRadius: 12, background: "linear-gradient(135deg,#6C63FF,#FF6B6B)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 19, boxShadow: "0 4px 18px rgba(108,99,255,.5)" }}>🚀</div>
-        <div>
-          <div style={{ fontWeight: 800, fontSize: 18, letterSpacing: "-.5px" }}>ProjectFlow</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 1 }}>
-            <div style={{ width: 6, height: 6, borderRadius: "50%", background: syncing ? "#FF8C00" : "#32CD32", animation: syncing ? "pulse 1s infinite" : "none", boxShadow: `0 0 7px ${syncing ? "#FF8C00" : "#32CD32"}` }} />
-            <span style={{ fontSize: 10, color: "rgba(255,255,255,.4)" }}>{syncing ? "Synchro…" : lastSync ? lastSync.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "En direct"}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Droite : Filtres + Nouveau + Identité */}
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <div style={{ position: "relative" }}>
-          <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 12 }}>🔎</span>
-          <input value={search} onChange={e => onSearch(e.target.value)} placeholder="Rechercher…" style={{ background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 11, padding: "7px 12px 7px 28px", color: "#fff", fontSize: 12, outline: "none", width: 145 }} />
-        </div>
-        <select value={filtPrio || ""} onChange={e => onFiltPrio(e.target.value || null)} style={{ background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 11, padding: "7px 10px", color: "#fff", fontSize: 12, outline: "none", cursor: "pointer" }}>
-          <option value="">Toutes priorités</option>
-          {PRIORITIES.map(p => <option key={p.label} value={p.label}>{p.icon} {p.label}</option>)}
-        </select>
-        <select value={filtMember || ""} onChange={e => onFiltMember(e.target.value ? parseInt(e.target.value) : null)} style={{ background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 11, padding: "7px 10px", color: "#fff", fontSize: 12, outline: "none", cursor: "pointer" }}>
-          <option value="">Tous les membres</option>
-          {ACCOUNTS.map(m => <option key={m.id} value={m.id}>{m.avatar} {m.name}</option>)}
-        </select>
-        <button onClick={onCreate} className="pf-btn-primary" style={{ background: "linear-gradient(135deg,#6C63FF,#FF6B6B)", border: "none", borderRadius: 11, padding: "8px 15px", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer", boxShadow: "0 4px 18px rgba(108,99,255,.4)", whiteSpace: "nowrap", transition: "transform .15s" }}>
-          ＋ Nouveau ticket
-        </button>
-
-        {/* Badge identité */}
-        <div style={{ display: "flex", alignItems: "center", gap: 7, background: currentUser.color + "22", border: `2px solid ${currentUser.color}`, borderRadius: 20, padding: "5px 12px", fontSize: 12, fontWeight: 700 }}>
-          <span style={{ fontSize: 15 }}>{currentUser.avatar}</span>
-          <span>{currentUser.name}</span>
-          {newCount > 0 && <div style={{ width: 18, height: 18, borderRadius: "50%", background: "#FF3B3B", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 800, animation: "badgePulse 1.5s infinite" }}>{newCount}</div>}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-
-// ============================================================
-// 8. KANBAN — Colonnes + Cartes tickets
+// 12. KANBAN CARD
 // ============================================================
 
-/** Carte d'un ticket dans le Kanban */
-function TicketCard({ ticket, currentUser, isDragging, isNew, onEdit, onWorkflow, onShare, onTransfer, onDragStart, onDragEnd }) {
+function TicketCard({ticket,currentUser,isDragging,isNew,onEdit,onWorkflow,onShare,onTransfer,onDragStart,onDragEnd,canDo}) {
   const prio   = getPriority(ticket.priority);
   const member = getMember(ticket.assignee);
   const ismine = ticket.assignee === currentUser.id;
 
   return (
-    <div
-      draggable
-      onDragStart={(e) => onDragStart(e, ticket)}
-      onDragEnd={onDragEnd}
-      className={!isDragging ? "pf-card" : ""}
-      style={{ background: isNew ? "rgba(255,59,59,.1)" : ismine ? `${currentUser.color}15` : "rgba(255,255,255,.07)", border: `1px solid ${isNew ? "#FF3B3B66" : ismine ? currentUser.color + "44" : isDragging ? "#6C63FF" : "rgba(255,255,255,.1)"}`, borderRadius: 13, padding: "10px 12px", cursor: "grab", opacity: isDragging ? 0.5 : 1, transform: isDragging ? "rotate(2deg)" : "none", transition: "all .15s", position: "relative", overflow: "hidden" }}
-    >
-      {/* Bande de priorité à gauche */}
-      <div style={{ position: "absolute", top: 0, left: 0, width: 3, height: "100%", background: prio.color, borderRadius: "13px 0 0 13px" }} />
+    <div draggable onDragStart={e=>onDragStart(e,ticket)} onDragEnd={onDragEnd}
+      className="pf-card-hover"
+      style={{background:"#fff",border:`1px solid ${isNew?"#FFE3E3":isDragging?"#3B5BDB":"#E8EAED"}`,borderRadius:10,padding:"12px 14px",cursor:"grab",opacity:isDragging?.5:1,transform:isDragging?"rotate(1.5deg)":"none",transition:"all .15s",position:"relative",marginBottom:8,boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
+
+      {/* Barre priorité */}
+      <div style={{position:"absolute",top:0,left:0,width:3,height:"100%",background:prio.color,borderRadius:"10px 0 0 10px"}}/>
 
       {/* Badge NEW */}
-      {isNew && <div style={{ position: "absolute", top: 8, right: 8, background: "#FF3B3B", borderRadius: 6, padding: "1px 6px", fontSize: 9, fontWeight: 800, color: "#fff" }}>NEW</div>}
+      {isNew&&<div style={{position:"absolute",top:8,right:8,background:"#E03131",color:"#fff",fontSize:9,fontWeight:700,padding:"1px 6px",borderRadius:4,letterSpacing:".3px"}}>NEW</div>}
 
-      <div style={{ paddingLeft: 7 }}>
-        {/* Titre + ID */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 }}>
-          <div style={{ fontWeight: 700, fontSize: 12, lineHeight: 1.3, flex: 1, paddingRight: isNew ? 30 : 0 }}>{ticket.title}</div>
-          <div style={{ fontSize: 9, color: "rgba(255,255,255,.3)", marginLeft: 6 }}>#{ticket.id}</div>
+      <div style={{paddingLeft:8}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:5}}>
+          <div style={{fontWeight:600,fontSize:13,color:"#1a1a1a",lineHeight:1.3,flex:1,paddingRight:isNew?32:0}}>{ticket.title}</div>
+          <div style={{fontSize:10,color:"#CED4DA",marginLeft:6,fontFamily:"monospace"}}>#{ticket.id}</div>
         </div>
 
-        {/* Description courte */}
-        {ticket.description && (
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6, lineHeight: 1.4 }}>
-            {ticket.description.length > 55 ? ticket.description.slice(0, 55) + "…" : ticket.description}
-          </div>
-        )}
+        {ticket.description&&<div style={{fontSize:11,color:"#868E96",marginBottom:8,lineHeight:1.5}}>{ticket.description.length>60?ticket.description.slice(0,60)+"…":ticket.description}</div>}
 
-        {/* Pièces jointes */}
-        {ticket.attachments?.length > 0 && (
-          <div style={{ fontSize: 10, color: "#A8A0FF", marginBottom: 5 }}>
-            📎 {ticket.attachments.length} pièce{ticket.attachments.length > 1 ? "s" : ""} jointe{ticket.attachments.length > 1 ? "s" : ""}
-          </div>
-        )}
+        {ticket.attachments?.length>0&&<div style={{fontSize:10,color:"#3B5BDB",marginBottom:6}}>📎 {ticket.attachments.length} fichier{ticket.attachments.length>1?"s":""}</div>}
 
-        {/* Tags */}
-        {ticket.tags?.length > 0 && (
-          <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginBottom: 6 }}>
-            {ticket.tags.map(tag => <span key={tag} style={{ background: "rgba(108,99,255,.25)", border: "1px solid rgba(108,99,255,.4)", borderRadius: 5, padding: "1px 6px", fontSize: 9, color: "#A8A0FF", fontWeight: 600 }}>{tag}</span>)}
-          </div>
-        )}
+        {ticket.tags?.length>0&&<div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:8}}>{ticket.tags.map(t=><span key={t} className="tag-chip">{t}</span>)}</div>}
 
-        {/* Priorité + Actions + Assigné */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 4 }}>
-          <PriorityBadge priority={ticket.priority} />
-          <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
-            <button onClick={e => { e.stopPropagation(); onWorkflow(ticket); }} style={{ background: "rgba(108,99,255,.3)", border: "1px solid rgba(108,99,255,.4)", borderRadius: 6, padding: "3px 6px", fontSize: 10, color: "#A8A0FF", cursor: "pointer" }}>🔄</button>
-            <button onClick={e => { e.stopPropagation(); onShare(ticket); }}    style={{ background: "rgba(255,255,255,.1)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 6, padding: "3px 6px", fontSize: 10, cursor: "pointer" }}>🔗</button>
-            <button onClick={e => { e.stopPropagation(); onEdit(ticket); }}     style={{ background: "rgba(255,255,255,.1)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 6, padding: "3px 6px", fontSize: 10, cursor: "pointer" }}>✏️</button>
-            <Avatar member={member} size={20} />
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <Badge color={prio.color} bg={prio.bg}>{prio.icon} {prio.label}</Badge>
+          <div style={{display:"flex",alignItems:"center",gap:4}}>
+            <button onClick={e=>{e.stopPropagation();onWorkflow(ticket);}} style={{background:"#F8F9FF",border:"1px solid #E0E7FF",borderRadius:6,padding:"3px 7px",fontSize:10,color:"#3B5BDB",cursor:"pointer"}}>🔄</button>
+            <button onClick={e=>{e.stopPropagation();onShare(ticket);}} style={{background:"#F8F9FA",border:"1px solid #E8EAED",borderRadius:6,padding:"3px 7px",fontSize:10,cursor:"pointer"}}>🔗</button>
+            <button onClick={e=>{e.stopPropagation();onEdit(ticket);}} style={{background:"#F8F9FA",border:"1px solid #E8EAED",borderRadius:6,padding:"3px 7px",fontSize:10,cursor:"pointer"}}>✏️</button>
+            {member
+              ?<div title={member.name} style={{width:22,height:22,borderRadius:"50%",background:member.color+"22",border:`1.5px solid ${member.color}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11}}>{member.avatar}</div>
+              :<div style={{width:22,height:22,borderRadius:"50%",background:"#F8F9FA",border:"1px solid #E8EAED",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#CED4DA"}}>—</div>
+            }
           </div>
         </div>
 
-        {/* Transfert rapide (visible seulement si le ticket m'est assigné) */}
-        {ismine && ticket.status !== "Terminé" && (
-          <div style={{ marginTop: 8, borderTop: "1px solid rgba(255,255,255,.08)", paddingTop: 7 }}>
-            <div style={{ fontSize: 9, color: "rgba(255,255,255,.35)", marginBottom: 5, fontWeight: 700 }}>TRANSFÉRER À</div>
-            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-              {ACCOUNTS.filter(m => m.id !== currentUser.id).map(m => (
-                <button key={m.id}
-                  onClick={e => { e.stopPropagation(); onTransfer(ticket, m.id); }}
-                  style={{ background: m.color + "22", border: `1px solid ${m.color}44`, borderRadius: 20, padding: "3px 8px", color: "#fff", fontSize: 10, cursor: "pointer", display: "flex", alignItems: "center", gap: 3, transition: "all .15s" }}
-                  onMouseEnter={e => e.currentTarget.style.borderColor = m.color}
-                  onMouseLeave={e => e.currentTarget.style.borderColor = m.color + "44"}
-                >
+        {/* Transfert rapide */}
+        {ismine&&ticket.status!=="Terminé"&&(
+          <div style={{marginTop:10,paddingTop:8,borderTop:"1px solid #F1F3F5"}}>
+            <div style={{fontSize:9,color:"#ADB5BD",marginBottom:5,fontWeight:700,letterSpacing:".5px"}}>TRANSFÉRER À</div>
+            <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+              {ACCOUNTS.filter(m=>m.id!==currentUser.id).map(m=>(
+                <button key={m.id} onClick={e=>{e.stopPropagation();onTransfer(ticket,m.id);}}
+                  style={{background:m.color+"15",border:`1px solid ${m.color}44`,borderRadius:20,padding:"3px 9px",fontSize:10,cursor:"pointer",display:"flex",alignItems:"center",gap:4,color:m.color,fontWeight:500,transition:"all .15s"}}
+                  onMouseEnter={e=>e.currentTarget.style.background=m.color+"30"}
+                  onMouseLeave={e=>e.currentTarget.style.background=m.color+"15"}>
                   {m.avatar} {m.name}
                 </button>
               ))}
@@ -1272,336 +899,381 @@ function TicketCard({ ticket, currentUser, isDragging, isNew, onEdit, onWorkflow
   );
 }
 
-/** Colonne du Kanban */
-function KanbanColumn({ column, tickets, currentUser, draggingId, isOver, isNewForMe, onEdit, onWorkflow, onShare, onTransfer, onDragStart, onDragEnd, onDragOver, onDrop, onDragLeave }) {
-  const cfg = COL_CFG[column];
-  return (
-    <div
-      onDragOver={onDragOver}
-      onDrop={onDrop}
-      onDragLeave={onDragLeave}
-      style={{ minWidth: 262, flex: "1 1 262px", maxWidth: 315, background: isOver ? `${cfg.color}22` : "rgba(255,255,255,.04)", border: `2px solid ${isOver ? cfg.color : "rgba(255,255,255,.08)"}`, borderRadius: 18, padding: 13, transition: "all .2s", backdropFilter: "blur(10px)" }}
-    >
-      {/* En-tête colonne */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 11 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ fontSize: 15 }}>{cfg.icon}</span>
-          <span style={{ fontWeight: 700, fontSize: 12, color: cfg.color }}>{column}</span>
-        </div>
-        <div style={{ background: cfg.bg, border: `1px solid ${cfg.color}55`, borderRadius: 20, padding: "2px 8px", fontSize: 11, fontWeight: 700, color: cfg.color }}>{tickets.length}</div>
-      </div>
-
-      {/* Cartes */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {tickets.map(ticket => (
-          <TicketCard
-            key={ticket.id}
-            ticket={ticket}
-            currentUser={currentUser}
-            isDragging={draggingId === ticket.id}
-            isNew={isNewForMe(ticket)}
-            onEdit={onEdit}
-            onWorkflow={onWorkflow}
-            onShare={onShare}
-            onTransfer={onTransfer}
-            onDragStart={onDragStart}
-            onDragEnd={onDragEnd}
-          />
-        ))}
-        {tickets.length === 0 && (
-          <div style={{ padding: "24px 0", textAlign: "center", color: "rgba(255,255,255,.2)", fontSize: 11, borderRadius: 11, border: "2px dashed rgba(255,255,255,.08)" }}>
-            <div style={{ fontSize: 22, marginBottom: 4 }}>📭</div>Glissez un ticket ici
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-
 // ============================================================
-// 9. BOARD — Composant principal du tableau
+// 13. BOARD (composant principal)
 // ============================================================
 
-function Board({ currentUser, onLogout }) {
-  // ── Données & stockage
-  const { tickets, nextId, loading, syncing, lastSync, persist } = useTicketStorage();
+function Board({currentUser,onLogout}) {
+  const {tickets,nextId,loading,syncing,lastSync,persist} = useTicketStorage();
+  const {profiles,saveProfiles,canDo,canSee}              = useProfiles();
+  const {alertModal,setAlertModal,newTickets,isNewForMe}  = useNotifications(currentUser,tickets,loading);
 
-  // ── Notifications
-  const { alertModal, setAlertModal, newTickets, isNewForMe } = useNotifications(currentUser, tickets, loading);
-
-  // ── UI state
-  const [modal,        setModal]        = useState(null);      // { type: 'ticket'|'workflow'|'share'|'settings', data? }
-  const [draggingId,   setDraggingId]   = useState(null);
-  const [dragOver,     setDragOver]     = useState(null);
-  const [search,       setSearch]       = useState("");
-  const [filtPrio,     setFiltPrio]     = useState(null);
-  const [filtMember,   setFiltMember]   = useState(null);
+  const [activePage,  setActivePage]  = useState("kanban");
+  const [modal,       setModal]       = useState(null);
+  const [draggingId,  setDraggingId]  = useState(null);
+  const [dragOver,    setDragOver]    = useState(null);
+  const [search,      setSearch]      = useState("");
+  const [filtPrio,    setFiltPrio]    = useState(null);
+  const [filtMember,  setFiltMember]  = useState(null);
 
   const dragRef = useRef(null);
 
-  // ── Tickets filtrés selon la recherche et les filtres
-  const filtered = tickets.filter(t => {
-    const matchSearch = t.title.toLowerCase().includes(search.toLowerCase()) || t.description?.toLowerCase().includes(search.toLowerCase());
-    return matchSearch && (!filtPrio || t.priority === filtPrio) && (!filtMember || t.assignee === filtMember);
+  const filtered  = tickets.filter(t=>{
+    const ms=t.title.toLowerCase().includes(search.toLowerCase())||t.description?.toLowerCase().includes(search.toLowerCase());
+    return ms&&(!filtPrio||t.priority===filtPrio)&&(!filtMember||t.assignee===filtMember);
   });
+  const myTickets = tickets.filter(t=>t.assignee===currentUser.id&&t.status!=="Terminé");
+  const newCount  = myTickets.filter(t=>isNewForMe(t)).length;
 
-  // ── Mes tickets en attente
-  const myTickets = tickets.filter(t => t.assignee === currentUser.id && t.status !== "Terminé");
+  // Modals
+  const openCreate    = () => setModal({type:"ticket",data:{title:"",description:"",status:"À faire",priority:"Moyenne",assignee:currentUser.id,tags:[],attachments:[],history:[],createdAt:Date.now(),assignedAt:Date.now()}});
+  const openEdit      = t  => setModal({type:"ticket",data:t});
+  const openWorkflow  = t  => setModal({type:"workflow",data:t});
+  const openShare     = t  => setModal({type:"share",data:t});
+  const closeModal    = ()  => setModal(null);
 
-  // ── Helpers d'ouverture de modals
-  const openCreateModal  = () => setModal({ type: "ticket", data: { title: "", description: "", status: "À faire", priority: "Moyenne", assignee: currentUser.id, tags: [], attachments: [], history: [], createdAt: Date.now(), assignedAt: Date.now() } });
-  const openEditModal    = (ticket) => setModal({ type: "ticket", data: ticket });
-  const openWorkflowModal = (ticket) => setModal({ type: "workflow", data: ticket });
-  const openShareModal   = (ticket) => setModal({ type: "share", data: ticket });
-  const closeModal       = () => setModal(null);
+  const handleSave = async form => {
+    const isCreate=!form.id;
+    let list,nid;
+    if(isCreate){list=[...tickets,{...form,id:nextId,history:[{date:Date.now(),member:currentUser.id,action:"Ticket créé"}]}];nid=nextId+1;}
+    else{list=tickets.map(t=>t.id===form.id?{...form}:t);nid=nextId;}
+    closeModal();await persist(list,nid);
+  };
 
-  // ── Sauvegarde d'un ticket (création ou modification)
-  const handleSaveTicket = async (form) => {
-    const isCreate = !form.id;
-    let list, nid;
-    if (isCreate) {
-      const hist = [{ date: Date.now(), member: currentUser.id, action: "Ticket créé" }];
-      list = [...tickets, { ...form, id: nextId, history: hist }];
-      nid  = nextId + 1;
-    } else {
-      list = tickets.map(t => t.id === form.id ? { ...form } : t);
-      nid  = nextId;
-    }
+  const handleDelete = async id => { closeModal();await persist(tickets.filter(t=>t.id!==id),nextId); };
+
+  const handleQuickTransfer = async(ticket,targetId) => {
+    const target=getMember(targetId);
+    const hist={date:Date.now(),member:currentUser.id,action:`Transféré à ${target?.avatar} ${target?.name}`};
+    await persist(tickets.map(t=>t.id!==ticket.id?t:{...t,assignee:targetId,assignedAt:Date.now(),history:[...(t.history||[]),hist]}),nextId);
+  };
+
+  const handleApplyWorkflow = async({ticket,action,targetMemberId,note}) => {
+    const target=getMember(targetMemberId);
+    const label=action.label+(target?` → ${target.avatar} ${target.name}`:"");
+    const hist={date:Date.now(),member:currentUser.id,action:label,note:note||null};
     closeModal();
-    await persist(list, nid);
+    await persist(tickets.map(t=>t.id!==ticket.id?t:{...t,assignee:targetMemberId,assignedAt:Date.now(),status:action.targetStatus||t.status,history:[...(t.history||[]),hist]}),nextId);
   };
 
-  // ── Suppression d'un ticket
-  const handleDeleteTicket = async (id) => {
-    closeModal();
-    await persist(tickets.filter(t => t.id !== id), nextId);
-  };
-
-  // ── Transfert rapide depuis la carte
-  const handleQuickTransfer = async (ticket, targetId) => {
-    const target = getMember(targetId);
-    const hist   = { date: Date.now(), member: currentUser.id, action: `Transféré à ${target?.avatar} ${target?.name}` };
-    await persist(
-      tickets.map(t => t.id !== ticket.id ? t : { ...t, assignee: targetId, assignedAt: Date.now(), history: [...(t.history || []), hist] }),
-      nextId
-    );
-  };
-
-  // ── Application d'un workflow
-  const handleApplyWorkflow = async ({ ticket, action, targetMemberId, note }) => {
-    const target = getMember(targetMemberId);
-    const label  = action.label + (target ? ` → ${target.avatar} ${target.name}` : "");
-    const hist   = { date: Date.now(), member: currentUser.id, action: label, note: note || null };
-    closeModal();
-    await persist(
-      tickets.map(t => t.id !== ticket.id ? t : { ...t, assignee: targetMemberId, assignedAt: Date.now(), status: action.targetStatus || t.status, history: [...(t.history || []), hist] }),
-      nextId
-    );
-  };
-
-  // ── Drag & Drop
-  const handleDragStart = (e, ticket) => { dragRef.current = ticket; setDraggingId(ticket.id); };
-  const handleDragEnd   = () => { dragRef.current = null; setDraggingId(null); setDragOver(null); };
-  const handleDrop = async (col) => {
-    if (dragRef.current && dragRef.current.status !== col) {
-      const hist = { date: Date.now(), member: currentUser.id, action: `Déplacé vers « ${col} »` };
-      await persist(
-        tickets.map(t => t.id !== dragRef.current.id ? t : { ...t, status: col, history: [...(t.history || []), hist] }),
-        nextId
-      );
+  const onDragStart = (e,t) => { dragRef.current=t;setDraggingId(t.id); };
+  const onDragEnd   = ()    => { dragRef.current=null;setDraggingId(null);setDragOver(null); };
+  const onDrop = async col  => {
+    if(dragRef.current&&dragRef.current.status!==col){
+      const hist={date:Date.now(),member:currentUser.id,action:`Déplacé vers « ${col} »`};
+      await persist(tickets.map(t=>t.id!==dragRef.current.id?t:{...t,status:col,history:[...(t.history||[]),hist]}),nextId);
     }
     setDragOver(null);
   };
 
-  // ── Réinitialisation du tableau
-  const handleReset = async () => {
-    if (!confirm("Réinitialiser le tableau ? Toutes les données seront perdues.")) return;
-    await persist(DEFAULT_TICKETS, 6);
-  };
+  const handleReset = async()=>{ if(!confirm("Réinitialiser ?")) return; await persist(DEFAULT_TICKETS,6); };
 
-  if (loading) return (
-    <div style={{ minHeight: "100vh", background: "linear-gradient(135deg,#0F0C29,#302B63,#24243e)", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 16, color: "#fff", fontFamily: "'Nunito','Segoe UI',sans-serif" }}>
-      <div style={{ fontSize: 48, animation: "spin 1s linear infinite" }}>🚀</div>
-      <div style={{ fontWeight: 700, fontSize: 18 }}>Chargement du tableau…</div>
+  // Navigation Sidebar
+  const NAV_ITEMS = [
+    {id:"kanban",    icon:"📋", label:"Tableau",       screen:"kanban"},
+    {id:"mytickets", icon:"🎫", label:"Mes tickets",   screen:"mytickets", badge:myTickets.length||null, badgeNew:newCount>0},
+    {id:"reports",   icon:"📊", label:"Rapports",      screen:"reports"},
+    {id:"chat",      icon:"💬", label:"Chat",          screen:"chat"},
+  ];
+
+  const SETTINGS_ITEMS = [
+    {id:"settings",   icon:"⚙️",  label:"Paramètres",        screen:"settings"},
+    {id:"rights",     icon:"🔐", label:"Droits utilisateurs",screen:"admin"},
+    {id:"adminpanel", icon:"👤", label:"Admin",              screen:"admin"},
+  ];
+
+  if(loading) return (
+    <div style={{minHeight:"100vh",background:"#F4F6F8",display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12,fontFamily:"'Inter',sans-serif"}}>
+      <style>{G}</style>
+      <div style={{fontSize:40,animation:"spin 1s linear infinite"}}>🚀</div>
+      <div style={{fontWeight:600,fontSize:16,color:"#1a1a1a"}}>Chargement…</div>
     </div>
   );
 
   return (
-    <div
-      style={{ minHeight: "100vh", background: "linear-gradient(135deg,#0F0C29 0%,#302B63 50%,#24243e 100%)", fontFamily: "'Nunito','Segoe UI',sans-serif", color: "#fff", overflowX: "hidden" }}
-      onMouseDown={() => {/* fermeture hamburger gérée dans BoardHeader */}}
-    >
-      <style>{GLOBAL_CSS}</style>
+    <div style={{minHeight:"100vh",background:"#F4F6F8",display:"flex",fontFamily:"'Inter',-apple-system,sans-serif",color:"#1a1a1a"}}>
+      <style>{G}</style>
 
-      {/* ── Alerte connexion */}
-      {alertModal && newTickets.length > 0 && (
-        <AlertModal
-          currentUser={currentUser}
-          tickets={newTickets}
-          onViewTicket={(t) => { setAlertModal(false); openEditModal(t); }}
-          onClose={() => setAlertModal(false)}
-        />
-      )}
+      {/* ── Alert modal */}
+      {alertModal&&newTickets.length>0&&<AlertModal currentUser={currentUser} tickets={newTickets} onViewTicket={t=>{setAlertModal(false);openEdit(t);}} onClose={()=>setAlertModal(false)}/>}
 
-      {/* ── Header */}
-      <BoardHeader
-        currentUser={currentUser}
-        syncing={syncing}
-        lastSync={lastSync}
-        myTickets={myTickets}
-        search={search}
-        filtPrio={filtPrio}
-        filtMember={filtMember}
-        isNewForMe={isNewForMe}
-        onSearch={setSearch}
-        onFiltPrio={setFiltPrio}
-        onFiltMember={setFiltMember}
-        onCreate={openCreateModal}
-        onLogout={onLogout}
-        onSettings={() => setModal({ type: "settings" })}
-        onFilterMyTickets={() => setFiltMember(currentUser.id)}
-        onFilterAll={() => setFiltMember(null)}
-      />
+      {/* ══ SIDEBAR ══ */}
+      <div style={{width:220,background:"#fff",borderRight:"1px solid #F1F3F5",display:"flex",flexDirection:"column",position:"fixed",top:0,bottom:0,left:0,zIndex:50}}>
 
-      {/* ── Bannière tickets assignés */}
-      {myTickets.length > 0 && (
-        <div style={{ background: `linear-gradient(90deg,${currentUser.color}18,transparent)`, borderBottom: `1px solid ${currentUser.color}33`, padding: "8px 22px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-          <span>{currentUser.avatar}</span>
-          <span style={{ fontSize: 12, color: "rgba(255,255,255,.7)" }}>
-            <strong style={{ color: currentUser.color }}>À vous de jouer !</strong> — {myTickets.length} ticket{myTickets.length > 1 ? "s" : ""} en attente
-          </span>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {myTickets.slice(0, 3).map(t => (
-              <button key={t.id} onClick={() => openEditModal(t)} style={{ background: isNewForMe(t) ? "#FF3B3B33" : currentUser.color + "22", border: `1px solid ${isNewForMe(t) ? "#FF3B3B" : currentUser.color + "55"}`, borderRadius: 8, padding: "3px 10px", color: isNewForMe(t) ? "#FF8080" : currentUser.color, fontSize: 11, cursor: "pointer", fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
-                {isNewForMe(t) && <span style={{ fontSize: 8, background: "#FF3B3B", color: "#fff", borderRadius: 4, padding: "1px 4px", fontWeight: 800 }}>NEW</span>}
-                #{t.id} {t.title.slice(0, 18)}{t.title.length > 18 ? "…" : ""}
-              </button>
-            ))}
-            {myTickets.length > 3 && <span style={{ fontSize: 11, color: "rgba(255,255,255,.4)", alignSelf: "center" }}>+{myTickets.length - 3}</span>}
+        {/* Logo */}
+        <div style={{padding:"20px 16px 16px",borderBottom:"1px solid #F1F3F5"}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <div style={{width:32,height:32,borderRadius:9,background:"#1a1a1a",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>🚀</div>
+            <div style={{fontWeight:700,fontSize:15,color:"#1a1a1a",letterSpacing:"-.3px"}}>ProjectFlow</div>
           </div>
-          <button onClick={() => setAlertModal(true)} style={{ marginLeft: "auto", background: "rgba(255,255,255,.07)", border: "1px solid rgba(255,255,255,.12)", borderRadius: 8, padding: "3px 10px", color: "rgba(255,255,255,.5)", fontSize: 11, cursor: "pointer" }}>🔔 Alertes</button>
+          <div style={{display:"flex",alignItems:"center",gap:5,marginTop:8,paddingLeft:2}}>
+            <div style={{width:5,height:5,borderRadius:"50%",background:syncing?"#E67E22":"#2F9E44",animation:syncing?"pulse 1s infinite":"none"}}/>
+            <span style={{fontSize:10,color:"#ADB5BD"}}>{syncing?"Synchro…":lastSync?lastSync.toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit",second:"2-digit"}):"En direct"}</span>
+          </div>
         </div>
-      )}
 
-      {/* ── Bannière partagé */}
-      <div style={{ background: "rgba(108,99,255,.07)", borderBottom: "1px solid rgba(108,99,255,.15)", padding: "7px 22px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <span style={{ fontSize: 11, color: "rgba(255,255,255,.45)" }}>👥 <strong style={{ color: "#A8A0FF" }}>Tableau partagé</strong> — Synchronisation automatique toutes les 3 s</span>
-        <button onClick={handleReset} style={{ background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", borderRadius: 8, padding: "3px 10px", color: "rgba(255,255,255,.35)", fontSize: 10, cursor: "pointer" }}>♻️ Réinitialiser</button>
-      </div>
+        {/* Navigation principale */}
+        <div style={{padding:"8px 8px",flex:1,overflowY:"auto"}}>
+          <SectionTitle>Navigation</SectionTitle>
+          {NAV_ITEMS.map(item=>{
+            if(!canSee(currentUser.id,item.screen)) return null;
+            const active=activePage===item.id;
+            return(
+              <div key={item.id} onClick={()=>setActivePage(item.id)} className="pf-sidebar-item"
+                style={{padding:"8px 10px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",gap:10,background:active?"#F0F4FF":"transparent",color:active?"#3B5BDB":"#495057",fontWeight:active?600:400,fontSize:13,transition:"all .15s",marginBottom:2}}>
+                <span style={{fontSize:16,width:20,textAlign:"center"}}>{item.icon}</span>
+                <span style={{flex:1}}>{item.label}</span>
+                {item.badge&&<span style={{background:item.badgeNew?"#E03131":"#E8EAED",color:item.badgeNew?"#fff":"#666",fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:100,animation:item.badgeNew?"badgePop 2s infinite":""}}>{item.badge}</span>}
+              </div>
+            );
+          })}
 
-      {/* ── Stats */}
-      <div style={{ padding: "11px 22px", display: "flex", gap: 8, overflowX: "auto" }}>
-        {COLUMNS.map(col => {
-          const cfg = COL_CFG[col];
-          const cnt = filtered.filter(t => t.status === col).length;
-          return (
-            <div key={col} style={{ background: cfg.bg, border: `1px solid ${cfg.color}44`, borderRadius: 11, padding: "7px 13px", display: "flex", alignItems: "center", gap: 7, whiteSpace: "nowrap" }}>
-              <span>{cfg.icon}</span>
-              <div>
-                <div style={{ fontSize: 10, color: "rgba(255,255,255,.5)" }}>{col}</div>
-                <div style={{ fontWeight: 800, fontSize: 15, color: cfg.color }}>{cnt}</div>
+          <SectionTitle>Configuration</SectionTitle>
+          {SETTINGS_ITEMS.map(item=>{
+            if(!canSee(currentUser.id,item.screen)) return null;
+            const active=activePage===item.id;
+            return(
+              <div key={item.id} onClick={()=>setActivePage(item.id)} className="pf-sidebar-item"
+                style={{padding:"8px 10px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",gap:10,background:active?"#F0F4FF":"transparent",color:active?"#3B5BDB":"#495057",fontWeight:active?600:400,fontSize:13,transition:"all .15s",marginBottom:2}}>
+                <span style={{fontSize:16,width:20,textAlign:"center"}}>{item.icon}</span>
+                <span>{item.label}</span>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* User card */}
+        <div style={{padding:"12px 12px",borderTop:"1px solid #F1F3F5"}}>
+          <div style={{background:"#F8F9FA",borderRadius:10,padding:"10px 12px",display:"flex",alignItems:"center",gap:10}}>
+            <div style={{width:32,height:32,borderRadius:"50%",background:currentUser.color+"22",border:`1.5px solid ${currentUser.color}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15}}>{currentUser.avatar}</div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:600,fontSize:12,color:"#1a1a1a"}}>{currentUser.name}</div>
+              <div style={{fontSize:10,color:"#ADB5BD",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                {(profiles[currentUser.id]?.roles||[]).map(r=>ROLES[r]?.label).join(", ")||"Aucun rôle"}
               </div>
             </div>
-          );
-        })}
-        <div style={{ background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", borderRadius: 11, padding: "7px 13px", display: "flex", alignItems: "center", gap: 7 }}>
-          <span>🎯</span>
-          <div>
-            <div style={{ fontSize: 10, color: "rgba(255,255,255,.5)" }}>Total</div>
-            <div style={{ fontWeight: 800, fontSize: 15 }}>{filtered.length}</div>
+            <button onClick={onLogout} title="Déconnexion" style={{background:"none",border:"none",cursor:"pointer",fontSize:14,color:"#ADB5BD",padding:4}} onMouseEnter={e=>e.currentTarget.style.color="#E03131"} onMouseLeave={e=>e.currentTarget.style.color="#ADB5BD"}>🚪</button>
           </div>
         </div>
       </div>
 
-      {/* ── Colonnes Kanban */}
-      <div style={{ display: "flex", gap: 12, padding: "4px 22px 32px", overflowX: "auto", alignItems: "flex-start" }}>
-        {COLUMNS.map(col => (
-          <KanbanColumn
-            key={col}
-            column={col}
-            tickets={filtered.filter(t => t.status === col)}
-            currentUser={currentUser}
-            draggingId={draggingId}
-            isOver={dragOver === col}
-            isNewForMe={isNewForMe}
-            onEdit={openEditModal}
-            onWorkflow={openWorkflowModal}
-            onShare={openShareModal}
-            onTransfer={handleQuickTransfer}
-            onDragStart={handleDragStart}
-            onDragEnd={handleDragEnd}
-            onDragOver={(e) => { e.preventDefault(); setDragOver(col); }}
-            onDrop={() => handleDrop(col)}
-            onDragLeave={() => setDragOver(null)}
-          />
-        ))}
+      {/* ══ MAIN CONTENT ══ */}
+      <div style={{marginLeft:220,flex:1,display:"flex",flexDirection:"column",minHeight:"100vh"}}>
+
+        {/* Topbar */}
+        <div style={{background:"#fff",borderBottom:"1px solid #F1F3F5",padding:"12px 28px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,position:"sticky",top:0,zIndex:40}}>
+          <div style={{fontWeight:700,fontSize:16,color:"#1a1a1a"}}>
+            {activePage==="kanban"&&"Tableau Kanban"}
+            {activePage==="mytickets"&&"Mes tickets"}
+            {activePage==="reports"&&"Rapports & KPI"}
+            {activePage==="chat"&&"Chat"}
+            {activePage==="settings"&&"Paramètres"}
+            {activePage==="rights"&&"Droits utilisateurs"}
+            {activePage==="adminpanel"&&"Administration"}
+          </div>
+
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            {(activePage==="kanban"||activePage==="mytickets")&&(<>
+              <div style={{position:"relative"}}>
+                <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",fontSize:12,color:"#ADB5BD"}}>🔎</span>
+                <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Rechercher…" style={{background:"#F8F9FA",border:"1px solid #E8EAED",borderRadius:8,padding:"7px 12px 7px 30px",fontSize:12,color:"#1a1a1a",outline:"none",width:180}}/>
+              </div>
+              <select value={filtPrio||""} onChange={e=>setFiltPrio(e.target.value||null)} style={{background:"#F8F9FA",border:"1px solid #E8EAED",borderRadius:8,padding:"7px 10px",fontSize:12,color:"#666",outline:"none",cursor:"pointer"}}>
+                <option value="">Toutes priorités</option>
+                {PRIORITIES.map(p=><option key={p.label} value={p.label}>{p.icon} {p.label}</option>)}
+              </select>
+              <select value={filtMember||""} onChange={e=>setFiltMember(e.target.value?parseInt(e.target.value):null)} style={{background:"#F8F9FA",border:"1px solid #E8EAED",borderRadius:8,padding:"7px 10px",fontSize:12,color:"#666",outline:"none",cursor:"pointer"}}>
+                <option value="">Tous les membres</option>
+                {ACCOUNTS.map(m=><option key={m.id} value={m.id}>{m.avatar} {m.name}</option>)}
+              </select>
+            </>)}
+            {canDo(currentUser.id,"create_ticket")&&(activePage==="kanban"||activePage==="mytickets")&&(
+              <Btn onClick={openCreate} variant="primary" size="sm">＋ Nouveau ticket</Btn>
+            )}
+          </div>
+        </div>
+
+        {/* ── Bannière mes tickets */}
+        {myTickets.length>0&&(activePage==="kanban"||activePage==="mytickets")&&(
+          <div style={{background:`linear-gradient(90deg,${currentUser.color}10,transparent)`,borderBottom:`1px solid ${currentUser.color}22`,padding:"8px 28px",display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+            <span>{currentUser.avatar}</span>
+            <span style={{fontSize:12,color:"#495057"}}><strong style={{color:currentUser.color}}>À vous de jouer !</strong> — {myTickets.length} ticket{myTickets.length>1?"s":""} en attente</span>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              {myTickets.slice(0,3).map(t=>(
+                <button key={t.id} onClick={()=>openEdit(t)} style={{background:isNewForMe(t)?"#FFF5F5":currentUser.color+"15",border:`1px solid ${isNewForMe(t)?"#FFE3E3":currentUser.color+"44"}`,borderRadius:6,padding:"2px 10px",fontSize:11,cursor:"pointer",fontWeight:600,color:isNewForMe(t)?"#E03131":currentUser.color,display:"flex",alignItems:"center",gap:4}}>
+                  {isNewForMe(t)&&<span style={{fontSize:8,background:"#E03131",color:"#fff",padding:"0 4px",borderRadius:3}}>NEW</span>}
+                  #{t.id} {t.title.slice(0,16)}{t.title.length>16?"…":""}
+                </button>
+              ))}
+            </div>
+            <button onClick={()=>setAlertModal(true)} style={{marginLeft:"auto",background:"none",border:"1px solid #E8EAED",borderRadius:6,padding:"3px 10px",fontSize:11,cursor:"pointer",color:"#868E96"}}>🔔 Alertes</button>
+          </div>
+        )}
+
+        {/* ══ PAGES ══ */}
+        <div style={{flex:1,padding:"20px 28px",overflowY:"auto"}}>
+
+          {/* ── Kanban */}
+          {activePage==="kanban"&&(
+            <div>
+              {/* Stats */}
+              <div style={{display:"flex",gap:12,marginBottom:20}}>
+                {COLUMNS.map(col=>{
+                  const cfg=COL_CFG[col];
+                  const cnt=filtered.filter(t=>t.status===col).length;
+                  return(
+                    <div key={col} style={{flex:1,background:"#fff",border:"1px solid #E8EAED",borderRadius:10,padding:"12px 16px",display:"flex",alignItems:"center",gap:10}}>
+                      <div style={{width:8,height:8,borderRadius:"50%",background:cfg.dot,flexShrink:0}}/>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:11,color:"#ADB5BD",fontWeight:600,letterSpacing:".3px"}}>{col.toUpperCase()}</div>
+                        <div style={{fontSize:20,fontWeight:700,color:"#1a1a1a",marginTop:1}}>{cnt}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+                <div style={{background:"#fff",border:"1px solid #E8EAED",borderRadius:10,padding:"12px 16px",display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:8,height:8,borderRadius:"50%",background:"#ADB5BD",flexShrink:0}}/>
+                  <div>
+                    <div style={{fontSize:11,color:"#ADB5BD",fontWeight:600,letterSpacing:".3px"}}>TOTAL</div>
+                    <div style={{fontSize:20,fontWeight:700,color:"#1a1a1a",marginTop:1}}>{filtered.length}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Colonnes */}
+              <div style={{display:"flex",gap:14,overflowX:"auto",alignItems:"flex-start",paddingBottom:16}}>
+                {COLUMNS.map(col=>{
+                  const cfg=COL_CFG[col];
+                  const colT=filtered.filter(t=>t.status===col);
+                  const isOver=dragOver===col;
+                  return(
+                    <div key={col} onDragOver={e=>{e.preventDefault();setDragOver(col);}} onDrop={()=>onDrop(col)} onDragLeave={()=>setDragOver(null)}
+                      style={{minWidth:260,flex:"1 1 260px",maxWidth:310,background:isOver?cfg.bg:"#F8F9FA",border:`1.5px solid ${isOver?cfg.dot:"#E8EAED"}`,borderRadius:12,padding:12,transition:"all .2s"}}>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,padding:"0 2px"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:7}}>
+                          <div style={{width:8,height:8,borderRadius:"50%",background:cfg.dot}}/>
+                          <span style={{fontWeight:600,fontSize:12,color:"#495057"}}>{col}</span>
+                        </div>
+                        <span style={{background:"#fff",border:"1px solid #E8EAED",borderRadius:100,padding:"1px 8px",fontSize:11,fontWeight:600,color:"#868E96"}}>{colT.length}</span>
+                      </div>
+                      {colT.map(ticket=>(
+                        <TicketCard key={ticket.id} ticket={ticket} currentUser={currentUser}
+                          isDragging={draggingId===ticket.id} isNew={isNewForMe(ticket)}
+                          onEdit={openEdit} onWorkflow={openWorkflow} onShare={openShare}
+                          onTransfer={handleQuickTransfer}
+                          onDragStart={onDragStart} onDragEnd={onDragEnd} canDo={action=>canDo(currentUser.id,action)}/>
+                      ))}
+                      {colT.length===0&&(
+                        <div style={{padding:"20px 0",textAlign:"center",color:"#CED4DA",fontSize:12,borderRadius:8,border:"1.5px dashed #E8EAED",background:"#fff"}}>
+                          <div style={{fontSize:20,marginBottom:4}}>📭</div>Glissez un ticket ici
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div style={{display:"flex",justifyContent:"flex-end",marginTop:8}}>
+                <button onClick={handleReset} style={{background:"none",border:"1px solid #E8EAED",borderRadius:6,padding:"4px 12px",fontSize:11,color:"#ADB5BD",cursor:"pointer"}}>♻️ Réinitialiser</button>
+              </div>
+            </div>
+          )}
+
+          {/* ── Mes tickets */}
+          {activePage==="mytickets"&&(
+            <div>
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                {myTickets.length===0
+                  ?<div style={{textAlign:"center",padding:"60px 0",color:"#ADB5BD"}}>
+                    <div style={{fontSize:40,marginBottom:12}}>🎉</div>
+                    <div style={{fontWeight:600,fontSize:16}}>Aucun ticket en attente !</div>
+                    <div style={{fontSize:13,marginTop:4}}>Vous êtes à jour.</div>
+                  </div>
+                  :myTickets.map(ticket=>{
+                    const prio=getPriority(ticket.priority);
+                    const isNew=isNewForMe(ticket);
+                    return(
+                      <div key={ticket.id} onClick={()=>openEdit(ticket)} style={{background:"#fff",border:`1px solid ${isNew?"#FFE3E3":"#E8EAED"}`,borderRadius:12,padding:"14px 16px",cursor:"pointer",display:"flex",alignItems:"center",gap:14,transition:"all .15s"}}
+                        onMouseEnter={e=>{e.currentTarget.style.boxShadow="0 2px 12px rgba(0,0,0,.06)";e.currentTarget.style.borderColor="#D0D5DD";}}
+                        onMouseLeave={e=>{e.currentTarget.style.boxShadow="none";e.currentTarget.style.borderColor=isNew?"#FFE3E3":"#E8EAED";}}>
+                        <div style={{width:4,height:40,background:prio.color,borderRadius:2,flexShrink:0}}/>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                            {isNew&&<span style={{background:"#E03131",color:"#fff",fontSize:9,fontWeight:700,padding:"1px 6px",borderRadius:4}}>NEW</span>}
+                            <div style={{fontWeight:600,fontSize:14,color:"#1a1a1a"}}>{ticket.title}</div>
+                          </div>
+                          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                            <Badge color={prio.color} bg={prio.bg}>{prio.icon} {prio.label}</Badge>
+                            <Badge color={COL_CFG[ticket.status]?.dot} bg={COL_CFG[ticket.status]?.bg}>{ticket.status}</Badge>
+                            <span style={{fontSize:11,color:"#ADB5BD",fontFamily:"monospace"}}>#{ticket.id}</span>
+                          </div>
+                        </div>
+                        <div style={{display:"flex",gap:6}}>
+                          <Btn onClick={e=>{e.stopPropagation();openWorkflow(ticket);}} variant="secondary" size="sm">🔄 Transférer</Btn>
+                        </div>
+                      </div>
+                    );
+                  })
+                }
+              </div>
+            </div>
+          )}
+
+          {/* ── Droits utilisateurs */}
+          {activePage==="rights"&&(
+            <div style={{background:"#fff",border:"1px solid #E8EAED",borderRadius:12,overflow:"hidden",animation:"fadeIn .3s ease",height:"calc(100vh - 160px)"}}>
+              <UserRightsPanel profiles={profiles} onSave={saveProfiles} currentUser={currentUser}/>
+            </div>
+          )}
+
+          {/* ── Pages "coming soon" */}
+          {["reports","chat","settings","adminpanel"].includes(activePage)&&(
+            <div style={{textAlign:"center",padding:"80px 0",animation:"fadeIn .3s ease"}}>
+              <div style={{fontSize:48,marginBottom:16}}>
+                {activePage==="reports"?"📊":activePage==="chat"?"💬":activePage==="settings"?"⚙️":"👤"}
+              </div>
+              <div style={{fontWeight:700,fontSize:20,color:"#1a1a1a",marginBottom:8}}>
+                {activePage==="reports"?"Rapports & KPI":activePage==="chat"?"Chat d'équipe":activePage==="settings"?"Paramètres":"Administration"}
+              </div>
+              <div style={{fontSize:14,color:"#868E96",marginBottom:20}}>Cette fonctionnalité est en cours de développement.</div>
+              <Badge color="#3B5BDB" bg="#EEF2FF">🚀 Bientôt disponible</Badge>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* ── Modals */}
-      {modal?.type === "ticket" && (
-        <TicketModal
-          ticket={modal.data}
-          currentUser={currentUser}
-          onSave={handleSaveTicket}
-          onDelete={handleDeleteTicket}
-          onClose={closeModal}
-          onOpenWorkflow={openWorkflowModal}
-          onOpenShare={openShareModal}
-        />
-      )}
-      {modal?.type === "workflow" && (
-        <WorkflowModal
-          ticket={modal.data}
-          currentUser={currentUser}
-          onApply={handleApplyWorkflow}
-          onClose={closeModal}
-        />
-      )}
-      {modal?.type === "share" && (
-        <ShareModal ticket={modal.data} onClose={closeModal} />
-      )}
-      {modal?.type === "settings" && (
-        <SettingsModal currentUser={currentUser} onClose={closeModal} />
-      )}
+      {/* ══ MODALS ══ */}
+      {modal?.type==="ticket"&&<TicketModal ticket={modal.data} currentUser={currentUser} onSave={handleSave} onDelete={handleDelete} onClose={closeModal} onOpenWorkflow={openWorkflow} onOpenShare={openShare} canDo={action=>canDo(currentUser.id,action)}/>}
+      {modal?.type==="workflow"&&<WorkflowModal ticket={modal.data} currentUser={currentUser} onApply={handleApplyWorkflow} onClose={closeModal}/>}
+      {modal?.type==="share"&&<ShareModal ticket={modal.data} onClose={closeModal}/>}
     </div>
   );
 }
 
-
 // ============================================================
-// 10. APP — Point d'entrée, gestion de la session utilisateur
+// 14. APP — Point d'entrée
 // ============================================================
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
 
-  // Vérifie si une session existe déjà au chargement
-  useEffect(() => {
-    const saved = sessionStorage.getItem("pf-user");
-    if (saved) {
-      try {
-        const user = JSON.parse(saved);
-        if (ACCOUNTS.find(a => a.id === user.id)) setCurrentUser(user);
-      } catch (_) {}
-    }
+  useEffect(()=>{
+    const saved=sessionStorage.getItem("pf-user");
+    if(saved){ try{ const u=JSON.parse(saved); if(ACCOUNTS.find(a=>a.id===u.id)) setCurrentUser(u); }catch(_){} }
     setAuthChecked(true);
-  }, []);
+  },[]);
 
-  const handleLogin = (account) => {
-    // On ne stocke jamais le mot de passe en session
-    const safeUser = { id: account.id, name: account.name, avatar: account.avatar, color: account.color, email: account.email };
-    sessionStorage.setItem("pf-user", JSON.stringify(safeUser));
-    setCurrentUser(safeUser);
+  const handleLogin = acc => {
+    const safe={id:acc.id,name:acc.name,avatar:acc.avatar,color:acc.color,email:acc.email};
+    sessionStorage.setItem("pf-user",JSON.stringify(safe));
+    setCurrentUser(safe);
   };
 
-  const handleLogout = () => {
-    sessionStorage.removeItem("pf-user");
-    setCurrentUser(null);
-  };
+  const handleLogout = () => { sessionStorage.removeItem("pf-user"); setCurrentUser(null); };
 
-  if (!authChecked) return null;
-  if (!currentUser)  return <LoginPage onLogin={handleLogin} />;
-  return <Board currentUser={currentUser} onLogout={handleLogout} />;
+  if(!authChecked) return null;
+  if(!currentUser)  return <LoginPage onLogin={handleLogin}/>;
+  return <Board currentUser={currentUser} onLogout={handleLogout}/>;
 }
+
