@@ -1,5 +1,6 @@
 
 
+
 /**
  * ============================================================
  * ProjectFlow — v2.0 Slate Edition
@@ -611,6 +612,35 @@ function TicketModal({ticket,currentUser,onSave,onDelete,onClose,onOpenWorkflow,
             <select value={form.priority||"Moyenne"} onChange={e=>upd("priority",e.target.value)} style={selectStyle}>
               {PRIORITIES.map(p=><option key={p.label} value={p.label}>{p.icon} {p.label}</option>)}
             </select>
+          </div>
+        </div>
+
+        {/* Date de début + Date d'échéance */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+          <div>
+            <label style={labelStyle}>📅 Date de début</label>
+            <input
+              type="date"
+              value={form.startDate || ""}
+              onChange={e => upd("startDate", e.target.value)}
+              style={{...selectStyle, color: form.startDate ? "#1a1a1a" : "#ADB5BD"}}
+            />
+          </div>
+          <div>
+            <label style={labelStyle}>⏳ Date d'échéance</label>
+            <input
+              type="date"
+              value={form.dueDate || ""}
+              onChange={e => upd("dueDate", e.target.value)}
+              min={form.startDate || ""}
+              style={{...selectStyle, color: form.dueDate ? (new Date(form.dueDate) < new Date() && form.status !== "Terminé" ? "#E03131" : "#1a1a1a") : "#ADB5BD"}}
+            />
+            {/* Alerte dépassement */}
+            {form.dueDate && new Date(form.dueDate) < new Date() && form.status !== "Terminé" && (
+              <div style={{fontSize:11,color:"#E03131",marginTop:4,display:"flex",alignItems:"center",gap:4}}>
+                ⚠️ Date dépassée
+              </div>
+            )}
           </div>
         </div>
         <div style={{marginBottom:14}}>
